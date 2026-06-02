@@ -1,0 +1,6 @@
+/bin/
+/dist/
+/spike/.work/
+*.test
+*.out
+.DS_Store
