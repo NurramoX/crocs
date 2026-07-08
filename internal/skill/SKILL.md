@@ -1,6 +1,6 @@
 ---
 name: crocs
-description: "Explore an unfamiliar git repository to answer topic/location questions like 'which files handle auth?' or 'which files relate to brokers?' without bloating the main agent's context. Uses the crocs CLI (fetch, grep, read-files, symbols, summary, tree) and delegates the read-heavy search-and-filter work to disposable subagents that return only a short list of relevant files. Trigger when the user asks where something lives in a codebase, which files are responsible for a feature/subsystem, or asks to find-then-understand code in a repo crocs tracks. Also trigger on 'explore the repo', 'find the files that do X', 'where is X handled', or any locate-then-read workflow over a large codebase."
+description: "Locate which files handle a topic in a git repository, without reading them into the main context, using the crocs CLI. Trigger when the user asks where a feature or subsystem lives in a repo crocs tracks, asks to explore or orient in an unfamiliar repository, or wants to fetch/track an external repo for exploration. Also reach for this when another task needs a locate-then-read pass over a codebase outside the working directory."
 ---
 
 # crocs
@@ -15,6 +15,19 @@ This exists because the expensive part of code exploration is the *reading* —
 skimming 80 candidate files to find the 8 that matter. Done in your context,
 that's 80 files of tokens you carry for the rest of the session. Done in a
 subagent, it's discarded the moment the subagent returns its list.
+
+**The doctrine: load the map at low resolution, zoom on demand.** The CLI is a
+resolution ladder:
+
+- **Low-res map** — `crocs summary` / `crocs map` / `crocs tree`. Load once per
+  repo; it orients everything after.
+- **Frontier queries** — `crocs grep` / `crocs symbols`. Tell you *where* to
+  zoom without paying for file bodies.
+- **Zoom** — `crocs read-files`. Full detail, paid per file. The only rung that
+  loads code into a context.
+
+Never zoom what a frontier query can answer, and never load the map at full
+resolution (a repo-wide symbol dump, a blanket grep you read yourself).
 
 ## When to use this skill vs. just querying directly
 
@@ -115,9 +128,21 @@ one subagent is fine. When in doubt, shard — two short subagent runs cost less
 than one biased run you have to re-do. See "Sharding large candidate sets"
 below for the mechanics.
 
+**Fail fast before spawning.** A missing project or an empty scope should fail
+here — in your context, cheaply — not inside two parallel subagents. Before
+delegating, confirm the repo is tracked (step 1's `crocs summary` fails loudly
+if not; `crocs fetch` it first) and that every `-i` scope you're about to hand
+out actually appears in the `crocs map` output.
+
 ### 4. Delegate search-and-filter to subagent(s)
 
-Spawn a subagent (Claude Code Task tool) per scope. Brief it tightly. Template:
+Spawn a subagent (Claude Code Task tool) per scope. Brief it tightly, and brief
+the *concept*, not guessed structure: describe what the code you want *does*
+("code that maps triage roles to label strings") and add a question the
+subagent can orient by ("where would a maintainer of X have to edit?"). Don't
+pre-guess file paths or symbol names you haven't verified — a wrong guess
+anchors the subagent on a dead end. The only paths in the brief should be the
+`-i` scope globs you validated against `crocs map`. Template:
 
 > You are searching the crocs-tracked repo `<name>` to find the files that
 > **handle** <topic> (not files that merely mention it in passing).
@@ -144,6 +169,12 @@ Spawn a subagent (Claude Code Task tool) per scope. Brief it tightly. Template:
 >    if the topic is a primary concern (dense matches, core definitions), not an
 >    incidental reference (one stray token in an unrelated module).
 >
+>    **You are done when every file in your (non-truncated) grep hit set is
+>    either ruled in or ruled out** — not when you've collected "some relevant
+>    files." Returning after the first few obvious hits is a contract
+>    violation: the main agent treats your list as the complete relevant set
+>    for your scope.
+>
 >    **Gut-check via symbols.** For any candidate that's large (>500 lines) or
 >    whose role you can't state in one sentence, run `crocs symbols <name> -p
 >    <file>` and count how many symbols name topic concepts. If only a small
@@ -157,7 +188,10 @@ Spawn a subagent (Claude Code Task tool) per scope. Brief it tightly. Template:
 >    - **Wrapper:** start with `<files>` on its own line, end with `</files>` on
 >      its own line.
 >    - **Between the markers:** one file per line, exactly
->      `<path> — <≤15-word role>`. Most-central first.
+>      `<path> — <tier> — <≤15-word role>`. Most-central first. `<tier>` is one
+>      of: `core` (the topic's home — the main agent will read these), `related`
+>      (participates but isn't the center), `speculative` (plausible from grep,
+>      unverified by you).
 >    - **Inside the markers:** nothing but list lines. No headers, no blank
 >      lines, no quoted symbol/function names, no file contents, no commentary.
 >    - **Outside the markers:** nothing. No preamble before `<files>`, no
@@ -166,9 +200,10 @@ Spawn a subagent (Claude Code Task tool) per scope. Brief it tightly. Template:
 >    Good (do this):
 >    ```
 >    <files>
->    src/auth/login.py — password login flow and session creation
->    src/auth/oauth.py — OAuth2/OIDC provider integration
->    src/auth/middleware.py — request authentication middleware
+>    src/auth/login.py — core — password login flow and session creation
+>    src/auth/oauth.py — core — OAuth2/OIDC provider integration
+>    src/auth/middleware.py — related — request authentication middleware
+>    src/config.py — speculative — appears to hold auth setting defaults
 >    </files>
 >    ```
 >
@@ -207,13 +242,16 @@ any preamble or trailing commentary. Two special cases:
 
 ### 5. Read the survivors (you)
 
-Now read just the handful the subagent flagged:
+Now zoom just the handful the subagent flagged, in tier order:
 
 ```
-crocs read-files <name> <file1> <file2> <file3>
+crocs read-files <name> <core1> <core2> <core3>
 ```
 
-You spent ~3 files of context, not 80, and you have an accurate relevant set.
+Read `core` files first — they usually answer the question. Pull in `related`
+files only where the core files reference them; touch `speculative` files only
+if the picture is still incomplete after that. You spent ~3 files of context,
+not 80, and you have an accurate relevant set.
 
 ## Sharding large candidate sets
 
@@ -241,12 +279,6 @@ dedupe the lists (they're short — merging is cheap and stays in your context).
 
 Two short sharded subagent runs cost less than one biased run you have to
 re-do. When in doubt, shard.
-
-## Keep the context clean
-
-- The relevant set comes back from subagents as a short list. Resist the urge to
-  pre-load a repo-wide symbol dump into your own context; let the subagents do
-  the reading and return only what matters.
 
 ## Quick reference
 
