@@ -24,8 +24,8 @@ import (
 // Options controls a single grep call.
 type Options struct {
 	Pattern    string   // raw pattern (regex)
-	Includes   []string // path-prefix include filters
-	Excludes   []string // path-prefix exclude filters
+	Includes   []string // include filters: literal path prefixes or globs (* ? [...])
+	Excludes   []string // exclude filters: literal path prefixes or globs
 	Context    int      // lines of context before & after each match
 	MaxResults int      // hard cap; 0 means use DefaultMaxResults
 	Multiline  bool     // pattern may span lines
@@ -72,18 +72,34 @@ func runRipgrep(ctx context.Context, root string, opts Options) (Result, error) 
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	args := []string{"--json", "--no-heading"}
+	// --hidden keeps the corpus aligned with the Go fallback (which walks
+	// dotfiles) and with what doc research wants: .github/ workflows and
+	// friends are prime material. .git itself stays excluded, as do
+	// nested .git dirs (submodules).
+	args := []string{"--json", "--hidden", "--glob", "!**/.git/**"}
 	if opts.Context > 0 {
 		args = append(args, fmt.Sprintf("--context=%d", opts.Context))
 	}
 	if opts.Multiline {
-		args = append(args, "--multiline")
+		// --multiline-dotall so `.` crosses newlines, matching the (?s) the
+		// Go fallback compiles — same -M pattern, same semantics per engine.
+		args = append(args, "--multiline", "--multiline-dotall")
 	}
 	for _, inc := range opts.Includes {
-		args = append(args, "--glob", makeRGGlob(inc))
+		if inc == "" {
+			continue
+		}
+		for _, g := range makeRGGlobs(inc) {
+			args = append(args, "--glob", g)
+		}
 	}
 	for _, exc := range opts.Excludes {
-		args = append(args, "--glob", "!"+makeRGGlob(exc))
+		if exc == "" {
+			continue
+		}
+		for _, g := range makeRGGlobs(exc) {
+			args = append(args, "--glob", "!"+g)
+		}
 	}
 	args = append(args, "--", opts.Pattern, ".")
 
@@ -100,7 +116,7 @@ func runRipgrep(ctx context.Context, root string, opts Options) (Result, error) 
 	}
 
 	res := Result{Engine: "ripgrep"}
-	matches, truncated := parseRipgrepJSON(stdout, opts)
+	matches, truncated, perr := parseRipgrepJSON(stdout, opts)
 	res.Matches = matches
 	res.Truncated = truncated
 
@@ -124,25 +140,34 @@ func runRipgrep(ctx context.Context, root string, opts Options) (Result, error) 
 	} else if werr != nil && !truncated {
 		return Result{}, fmt.Errorf("rg wait: %w: %s", werr, strings.TrimSpace(stderr.String()))
 	}
+	if perr != nil && !truncated {
+		// A read/oversize error mid-stream means the match list is silently
+		// incomplete — surface it rather than report truncated=false results.
+		return Result{}, fmt.Errorf("read rg output: %w", perr)
+	}
 	return res, nil
 }
 
-// makeRGGlob converts a user-supplied path prefix into a ripgrep glob. If
-// the input already looks like a glob (contains * or ?), pass it through.
-func makeRGGlob(s string) string {
-	if strings.ContainsAny(s, "*?") {
-		return s
+// makeRGGlobs converts a user-supplied path filter into ripgrep globs. An
+// input that already looks like a glob (contains * ? or [) passes through.
+// A literal path yields two globs — the path itself (so an exact file like
+// `src/auth.py` matches; `src/auth.py/**` alone would not) and its contents
+// as a directory. Both are root-anchored, matching the segment-aware prefix
+// semantics of the Go fallback's pathMatches.
+func makeRGGlobs(s string) []string {
+	if strings.ContainsAny(s, "*?[") {
+		return []string{s}
 	}
 	s = strings.TrimSuffix(s, "/")
-	return s + "/**"
+	return []string{s, s + "/**"}
 }
 
 // parseRipgrepJSON streams rg's --json output and assembles Match records.
 // We collect context entries between matches and attach them to the next
-// match (before) or the most recent match (after).
-func parseRipgrepJSON(r interface {
-	Read(p []byte) (n int, err error)
-}, opts Options) ([]Match, bool) {
+// match (before) or the most recent match (after). The returned error is
+// the scanner's — non-nil means the stream ended early (read failure or a
+// line above the buffer cap) and the match list may be incomplete.
+func parseRipgrepJSON(r io.Reader, opts Options) ([]Match, bool, error) {
 	type submatch struct {
 		Start int `json:"start"`
 	}
@@ -165,9 +190,9 @@ func parseRipgrepJSON(r interface {
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 
 	var (
-		matches  []Match
-		pending  []string // context_before lines queued for the next match
-		lastIdx  = -1     // index of the most recent match in `matches`
+		matches []Match
+		pending []string // context_before lines queued for the next match
+		lastIdx = -1     // index of the most recent match in `matches`
 	)
 
 	for scanner.Scan() {
@@ -198,7 +223,7 @@ func parseRipgrepJSON(r interface {
 			}
 		case "match":
 			if len(matches) >= opts.MaxResults {
-				return matches, true
+				return matches, true, nil
 			}
 			var ld lineData
 			if err := json.Unmarshal(ev.Data, &ld); err != nil {
@@ -225,7 +250,7 @@ func parseRipgrepJSON(r interface {
 			lastIdx = -1
 		}
 	}
-	return matches, false
+	return matches, false, scanner.Err()
 }
 
 // --- pure-Go backend -----------------------------------------------------
@@ -250,12 +275,22 @@ func runGo(ctx context.Context, root string, opts Options) (Result, error) {
 	var jobs []job
 	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			if d.Name() == ".git" && path != root {
+			// One unreadable directory must not abort the whole search.
+			if path == root {
+				return err
+			}
+			if d != nil && d.IsDir() {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if d.Name() == ".git" && path != root {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil // gitlink file (submodule/worktree)
+		}
+		if d.IsDir() {
 			return nil
 		}
 		rel, err := filepath.Rel(root, path)
@@ -299,7 +334,6 @@ func runGo(ctx context.Context, root string, opts Options) (Result, error) {
 			return Result{}, ctx.Err()
 		default:
 		}
-		i, j := i, j
 		wg.Add(1)
 		sem <- struct{}{}
 		go func() {
@@ -311,15 +345,18 @@ func runGo(ctx context.Context, root string, opts Options) (Result, error) {
 	wg.Wait()
 
 	out := Result{Engine: "go"}
+collect:
 	for _, fr := range results {
 		for _, m := range fr.matches {
 			if len(out.Matches) >= opts.MaxResults {
 				out.Truncated = true
-				return out, nil
+				break collect
 			}
 			out.Matches = append(out.Matches, m)
 		}
 	}
+	// Sort truncated results too — jobs accumulate in WalkDir order, and a
+	// truncated run must not silently switch to a different ordering.
 	sort.SliceStable(out.Matches, func(i, j int) bool {
 		if out.Matches[i].Path != out.Matches[j].Path {
 			return out.Matches[i].Path < out.Matches[j].Path
@@ -334,7 +371,7 @@ func searchFile(abs, rel string, re *regexp.Regexp, opts Options) []Match {
 	if err != nil {
 		return nil
 	}
-	if !isProbablyText(data) {
+	if !IsProbablyText(data) {
 		return nil
 	}
 	lines := strings.Split(string(data), "\n")
@@ -346,34 +383,47 @@ func searchFile(abs, rel string, re *regexp.Regexp, opts Options) []Match {
 		locs := re.FindAllIndex(data, -1)
 		for _, loc := range locs {
 			line, col := offsetToLineCol(data, loc[0])
-			out = append(out, buildMatch(rel, line, col, lines, opts.Context))
+			endLine := line
+			if loc[1] > loc[0] {
+				endLine, _ = offsetToLineCol(data, loc[1]-1)
+			}
+			out = append(out, buildMatch(rel, line, endLine, col, lines, opts.Context))
 		}
 		return out
 	}
 	for i, l := range lines {
 		if locs := re.FindStringIndex(l); locs != nil {
-			out = append(out, buildMatch(rel, i+1, locs[0]+1, lines, opts.Context))
+			out = append(out, buildMatch(rel, i+1, i+1, locs[0]+1, lines, opts.Context))
 		}
 	}
 	return out
 }
 
-func buildMatch(rel string, line, col int, lines []string, ctxN int) Match {
-	m := Match{Path: rel, Line: line, Column: col, Text: lines[line-1]}
+// buildMatch assembles one Match spanning lines line..endLine (equal for
+// single-line matches). Text carries every line the match covers — the same
+// shape ripgrep's --json lines.text has for multiline matches.
+func buildMatch(rel string, line, endLine, col int, lines []string, ctxN int) Match {
+	if endLine < line {
+		endLine = line
+	}
+	if endLine > len(lines) {
+		endLine = len(lines)
+	}
+	m := Match{Path: rel, Line: line, Column: col, Text: strings.Join(lines[line-1:endLine], "\n")}
 	if ctxN > 0 {
 		start := line - 1 - ctxN
 		if start < 0 {
 			start = 0
 		}
-		end := line + ctxN
+		end := endLine + ctxN
 		if end > len(lines) {
 			end = len(lines)
 		}
 		if start < line-1 {
 			m.ContextBefore = append([]string(nil), lines[start:line-1]...)
 		}
-		if line < end {
-			m.ContextAfter = append([]string(nil), lines[line:end]...)
+		if endLine < end {
+			m.ContextAfter = append([]string(nil), lines[endLine:end]...)
 		}
 	}
 	return m
@@ -395,7 +445,7 @@ func offsetToLineCol(data []byte, off int) (line, col int) {
 
 func pathMatches(rel string, includes, excludes []string) bool {
 	for _, e := range excludes {
-		if e != "" && strings.HasPrefix(rel, e) {
+		if e != "" && matchOne(rel, e) {
 			return false
 		}
 	}
@@ -403,17 +453,94 @@ func pathMatches(rel string, includes, excludes []string) bool {
 		return true
 	}
 	for _, inc := range includes {
-		if inc != "" && strings.HasPrefix(rel, inc) {
+		if inc != "" && matchOne(rel, inc) {
 			return true
 		}
 	}
 	return false
 }
 
-// isProbablyText returns true if the first 8KiB of the buffer look like
+// matchOne mirrors makeRGGlobs for the Go backend: glob-looking patterns
+// match as globs; literal paths match themselves or their directory
+// contents, segment-aware (so `src` matches `src/a.py` but not `src2/b.py`).
+func matchOne(rel, pat string) bool {
+	if strings.ContainsAny(pat, "*?[") {
+		return globMatchPath(rel, pat)
+	}
+	pat = strings.TrimSuffix(pat, "/")
+	return rel == pat || strings.HasPrefix(rel, pat+"/")
+}
+
+// globMatchPath evaluates a ripgrep-style glob against a slash-separated
+// relative path: `*` and `?` stop at path separators, `**` crosses them,
+// and a glob with no separator matches against the basename (so `*.go`
+// hits at any depth, as it does under rg).
+func globMatchPath(rel, pat string) bool {
+	subject := rel
+	if !strings.Contains(pat, "/") {
+		if i := strings.LastIndexByte(rel, '/'); i >= 0 {
+			subject = rel[i+1:]
+		}
+	}
+	re, err := globToRegexp(pat)
+	if err != nil {
+		return false
+	}
+	return re.MatchString(subject)
+}
+
+var globRegexpCache sync.Map // pattern string -> *regexp.Regexp
+
+func globToRegexp(pat string) (*regexp.Regexp, error) {
+	if cached, ok := globRegexpCache.Load(pat); ok {
+		return cached.(*regexp.Regexp), nil
+	}
+	var b strings.Builder
+	b.WriteString("^")
+	for i := 0; i < len(pat); i++ {
+		switch c := pat[i]; c {
+		case '*':
+			if i+1 < len(pat) && pat[i+1] == '*' {
+				i++
+				// `**/` may also match zero directories.
+				if i+1 < len(pat) && pat[i+1] == '/' {
+					i++
+					b.WriteString(`(?:.*/)?`)
+				} else {
+					b.WriteString(`.*`)
+				}
+			} else {
+				b.WriteString(`[^/]*`)
+			}
+		case '?':
+			b.WriteString(`[^/]`)
+		case '[':
+			// Pass character classes through; regexp syntax is a superset of
+			// the glob class syntax we accept.
+			end := strings.IndexByte(pat[i:], ']')
+			if end < 0 {
+				b.WriteString(regexp.QuoteMeta(string(c)))
+				continue
+			}
+			b.WriteString(pat[i : i+end+1])
+			i += end
+		default:
+			b.WriteString(regexp.QuoteMeta(string(c)))
+		}
+	}
+	b.WriteString("$")
+	re, err := regexp.Compile(b.String())
+	if err != nil {
+		return nil, err
+	}
+	globRegexpCache.Store(pat, re)
+	return re, nil
+}
+
+// IsProbablyText returns true if the first 8KiB of the buffer look like
 // text. We treat a NUL byte in the first chunk as the canonical signal of
-// "binary".
-func isProbablyText(b []byte) bool {
+// "binary". Shared with read-files, which must not emit NUL bytes into XML.
+func IsProbablyText(b []byte) bool {
 	if len(b) > 8192 {
 		b = b[:8192]
 	}

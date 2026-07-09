@@ -8,11 +8,11 @@ import (
 )
 
 type grepResponse struct {
-	Name      string         `json:"name"`
-	Pattern   string         `json:"pattern"`
-	Matches   []grepx.Match  `json:"matches"`
-	Truncated bool           `json:"truncated"`
-	Engine    string         `json:"engine"`
+	Name      string        `json:"name"`
+	Pattern   string        `json:"pattern"`
+	Matches   []grepx.Match `json:"matches"`
+	Truncated bool          `json:"truncated"`
+	Engine    string        `json:"engine"`
 }
 
 var (
