@@ -135,6 +135,45 @@ Cobra is a library for creating powerful modern CLI applications.
 	}
 }
 
+func TestExcerpt_NestedHTMLAlignBanner(t *testing.T) {
+	// A <p align> nested inside a <div align> banner: the inner </p> must
+	// not end the outer block — everything up to the final </div> is
+	// decoration and must be dropped.
+	in := `<div align="center">
+<p align="center">
+<img src="https://example.com/logo.png" alt="logo"/>
+</p>
+Sponsored by BigCorp — the enterprise platform for everything.
+</div>
+
+# my-tool
+
+Real substantive intro prose.
+`
+	out := Excerpt(in)
+	if strings.Contains(out, "Sponsored by BigCorp") {
+		t.Errorf("nested banner content leaked into excerpt:\n%s", out)
+	}
+	if strings.Contains(out, "</div>") {
+		t.Errorf("banner close tag leaked into excerpt:\n%s", out)
+	}
+	if !strings.Contains(out, "Real substantive intro prose.") {
+		t.Errorf("substantive prose missing:\n%s", out)
+	}
+}
+
+func TestExcerpt_PreAlignIsNotABanner(t *testing.T) {
+	// <pre align=...> must not be treated as a <p align> banner open.
+	in := "<pre align=\"left\">\nreal preformatted content\n</pre>\n\nIntro prose here.\n"
+	out := Excerpt(in)
+	if !strings.Contains(out, "Intro prose here.") {
+		t.Errorf("prose missing:\n%s", out)
+	}
+	if !strings.Contains(out, "real preformatted content") {
+		t.Errorf("<pre> content wrongly swallowed by banner filter:\n%s", out)
+	}
+}
+
 func TestExcerpt_CodeBlockPassesThrough(t *testing.T) {
 	in := "# example\n\n```go\nfunc main() { <img/> }\n```\n\nsome real prose."
 	out := Excerpt(in)

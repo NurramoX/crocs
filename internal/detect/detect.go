@@ -4,6 +4,7 @@
 package detect
 
 import (
+	"math"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -13,46 +14,46 @@ import (
 // canonical language label. Filenames-without-extension are matched against
 // nameToLang.
 var extToLang = map[string]string{
-	".go":    "Go",
-	".py":    "Python",
-	".ts":    "TypeScript",
-	".tsx":   "TSX",
-	".js":    "JavaScript",
-	".jsx":   "JSX",
-	".java":  "Java",
-	".rs":    "Rust",
-	".rb":    "Ruby",
-	".c":     "C",
-	".h":     "C/C++ header",
-	".cc":    "C++",
-	".cpp":   "C++",
-	".cxx":   "C++",
-	".hpp":   "C++",
-	".cs":    "C#",
-	".kt":    "Kotlin",
-	".swift": "Swift",
-	".scala": "Scala",
-	".clj":   "Clojure",
-	".elm":   "Elm",
-	".ex":    "Elixir",
-	".exs":   "Elixir",
-	".erl":   "Erlang",
-	".hs":    "Haskell",
-	".lua":   "Lua",
-	".php":   "PHP",
-	".pl":    "Perl",
-	".pm":    "Perl",
-	".sh":    "Shell",
-	".bash":  "Shell",
-	".zsh":   "Shell",
-	".fish":  "Shell",
-	".ps1":   "PowerShell",
-	".sql":   "SQL",
-	".html":  "HTML",
-	".css":   "CSS",
-	".scss":  "SCSS",
-	".less":  "Less",
-	".vue":   "Vue",
+	".go":     "Go",
+	".py":     "Python",
+	".ts":     "TypeScript",
+	".tsx":    "TSX",
+	".js":     "JavaScript",
+	".jsx":    "JSX",
+	".java":   "Java",
+	".rs":     "Rust",
+	".rb":     "Ruby",
+	".c":      "C",
+	".h":      "C/C++ header",
+	".cc":     "C++",
+	".cpp":    "C++",
+	".cxx":    "C++",
+	".hpp":    "C++",
+	".cs":     "C#",
+	".kt":     "Kotlin",
+	".swift":  "Swift",
+	".scala":  "Scala",
+	".clj":    "Clojure",
+	".elm":    "Elm",
+	".ex":     "Elixir",
+	".exs":    "Elixir",
+	".erl":    "Erlang",
+	".hs":     "Haskell",
+	".lua":    "Lua",
+	".php":    "PHP",
+	".pl":     "Perl",
+	".pm":     "Perl",
+	".sh":     "Shell",
+	".bash":   "Shell",
+	".zsh":    "Shell",
+	".fish":   "Shell",
+	".ps1":    "PowerShell",
+	".sql":    "SQL",
+	".html":   "HTML",
+	".css":    "CSS",
+	".scss":   "SCSS",
+	".less":   "Less",
+	".vue":    "Vue",
 	".svelte": "Svelte",
 	".md":     "Markdown",
 	".rst":    "reStructuredText",
@@ -71,16 +72,16 @@ var extToLang = map[string]string{
 
 // nameToLang matches whole basenames (no extension) to a language label.
 var nameToLang = map[string]string{
-	"Dockerfile":         "Dockerfile",
-	"Containerfile":      "Dockerfile",
-	"Makefile":           "Make",
-	"GNUmakefile":        "Make",
-	"Justfile":           "Just",
-	"Rakefile":           "Ruby",
-	"Gemfile":            "Ruby",
-	"build.gradle":       "Gradle",
-	"settings.gradle":    "Gradle",
-	"build.gradle.kts":   "Gradle (Kotlin DSL)",
+	"Dockerfile":          "Dockerfile",
+	"Containerfile":       "Dockerfile",
+	"Makefile":            "Make",
+	"GNUmakefile":         "Make",
+	"Justfile":            "Just",
+	"Rakefile":            "Ruby",
+	"Gemfile":             "Ruby",
+	"build.gradle":        "Gradle",
+	"settings.gradle":     "Gradle",
+	"build.gradle.kts":    "Gradle (Kotlin DSL)",
 	"settings.gradle.kts": "Gradle (Kotlin DSL)",
 }
 
@@ -142,9 +143,10 @@ func Histogram(paths []string) []LangCount {
 	return out
 }
 
+// roundShare rounds to four decimal places so shares are stable across
+// runs. Rounded independently per language, so the column need not sum to
+// exactly 1.0.
 func roundShare(f float64) float64 {
-	// Four decimal places — 0..1 precision the consumer can hexdump without
-	// surprise float drift.
 	const scale = 10000.0
-	return float64(int64(f*scale+0.5)) / scale
+	return math.Round(f*scale) / scale
 }

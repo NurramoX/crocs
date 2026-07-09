@@ -19,8 +19,11 @@ var (
 
 var mapCmd = &cobra.Command{
 	Use:   "map <name>",
-	Short: "Directory heatmap: per-directory file counts, hottest first",
-	Args:  cobra.ExactArgs(1),
+	Short: "Directory heatmap: per-directory file counts (non-recursive), hottest first",
+	Long: `Per-directory file counts, hottest first. Counts are non-recursive: each
+directory counts only the files directly in it, so parents don't drown out
+the dense leaf directories agents are looking for.`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmdCtx(cmd)
 		db, err := openRegistry(ctx)
@@ -52,7 +55,7 @@ var mapCmd = &cobra.Command{
 }
 
 func init() {
-	mapCmd.Flags().StringSliceVarP(&mapIncludes, "include", "i", nil, "include only paths starting with this prefix (repeatable)")
-	mapCmd.Flags().StringSliceVarP(&mapExcludes, "exclude", "e", nil, "exclude paths starting with this prefix (repeatable)")
+	mapCmd.Flags().StringSliceVarP(&mapIncludes, "include", "i", nil, "include only paths under this path (repeatable)")
+	mapCmd.Flags().StringSliceVarP(&mapExcludes, "exclude", "e", nil, "exclude paths under this path (repeatable)")
 	rootCmd.AddCommand(mapCmd)
 }

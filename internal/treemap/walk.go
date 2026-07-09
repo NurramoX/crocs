@@ -11,9 +11,11 @@ import (
 	"strings"
 )
 
-// Filters narrows a walk by prefix include/exclude lists. Empty Includes
-// means "include everything"; non-empty means "include only paths starting
-// with any prefix in the list". Excludes always wins over Includes.
+// Filters narrows a walk by path include/exclude lists. Empty Includes
+// means "include everything"; non-empty means "include only matching
+// paths". Excludes always wins over Includes. Matching is segment-aware:
+// `src` matches `src/a.py` and `src` itself, but not `src2/b.py` — the
+// same semantics crocs grep gives literal -i/-e filters.
 type Filters struct {
 	Includes []string
 	Excludes []string
@@ -22,7 +24,7 @@ type Filters struct {
 // match reports whether a relative path matches the filter set.
 func (f Filters) match(rel string) bool {
 	for _, e := range f.Excludes {
-		if e != "" && strings.HasPrefix(rel, e) {
+		if matchPrefix(rel, e) {
 			return false
 		}
 	}
@@ -30,11 +32,19 @@ func (f Filters) match(rel string) bool {
 		return true
 	}
 	for _, p := range f.Includes {
-		if p != "" && strings.HasPrefix(rel, p) {
+		if matchPrefix(rel, p) {
 			return true
 		}
 	}
 	return false
+}
+
+func matchPrefix(rel, pat string) bool {
+	if pat == "" {
+		return false
+	}
+	pat = strings.TrimSuffix(pat, "/")
+	return rel == pat || strings.HasPrefix(rel, pat+"/")
 }
 
 // defaultSkipDirs is hard-coded to keep walks fast on real repos. The .git
@@ -45,17 +55,27 @@ var defaultSkipDirs = map[string]struct{}{
 
 // Walk returns every file path under root that survives the filter set.
 // Paths are slash-separated and relative to root. .git/ is unconditionally
-// pruned.
+// pruned. Unreadable subdirectories are skipped, not fatal — one bad
+// permission bit must not blank out the whole listing.
 func Walk(root string, f Filters) ([]string, error) {
 	var out []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			if _, skip := defaultSkipDirs[d.Name()]; skip && path != root {
+			if path == root {
+				return err
+			}
+			if d != nil && d.IsDir() {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if _, skip := defaultSkipDirs[d.Name()]; skip && path != root {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil // .git gitlink file (submodule/worktree)
+		}
+		if d.IsDir() {
 			return nil
 		}
 		rel, err := filepath.Rel(root, path)

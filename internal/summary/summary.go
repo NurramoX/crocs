@@ -4,11 +4,14 @@
 package summary
 
 import (
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // MaxReadmeBytes caps the size of the README we'll read off disk. Excerpt
@@ -79,16 +82,16 @@ var requirementsRe = regexp.MustCompile(`(?i)^requirements.*\.txt$`)
 
 // configNames are key non-dependency config files at the project root.
 var configNames = map[string]struct{}{
-	"Dockerfile":         {},
-	"Containerfile":      {},
-	"docker-compose.yml": {},
+	"Dockerfile":          {},
+	"Containerfile":       {},
+	"docker-compose.yml":  {},
 	"docker-compose.yaml": {},
-	"Makefile":           {},
-	"GNUmakefile":        {},
-	"Justfile":           {},
-	"justfile":           {},
-	"Taskfile.yml":       {},
-	"Taskfile.yaml":      {},
+	"Makefile":            {},
+	"GNUmakefile":         {},
+	"Justfile":            {},
+	"justfile":            {},
+	"Taskfile.yml":        {},
+	"Taskfile.yaml":       {},
 }
 
 // configExts contains extensions for top-level CI/config yaml files
@@ -181,9 +184,11 @@ func isConfig(name string) bool {
 }
 
 // categoryRank groups important files so the output reads naturally:
-//   0 — README + CONTRIBUTING + LICENSE + friends
-//   1 — dependency manifests
-//   2 — config / build / CI
+//
+//	0 — README + CONTRIBUTING + LICENSE + friends
+//	1 — dependency manifests
+//	2 — config / build / CI
+//
 // alphabetical within group.
 func categoryRank(name string) int {
 	switch {
@@ -241,10 +246,25 @@ func ReadReadme(root string) (Readme, error) {
 	defer f.Close()
 
 	buf := make([]byte, MaxReadmeBytes)
-	n, _ := f.Read(buf)
+	n, err := io.ReadFull(f, buf)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return Readme{}, err
+	}
+	data := buf[:n]
+	if n == MaxReadmeBytes {
+		// The cap may have split a multi-byte UTF-8 rune — trim the partial
+		// tail rather than emitting a mangled final character.
+		for i := 0; i < 3 && len(data) > 0; i++ {
+			r, size := utf8.DecodeLastRune(data)
+			if r != utf8.RuneError || size != 1 {
+				break
+			}
+			data = data[:len(data)-1]
+		}
+	}
 	return Readme{
 		Path:    name,
-		Excerpt: Excerpt(string(buf[:n])),
+		Excerpt: Excerpt(string(data)),
 	}, nil
 }
 
@@ -290,15 +310,22 @@ func Excerpt(content string) string {
 			continue
 		}
 
-		// Already inside an aligned HTML banner block? Skip until close.
+		// Already inside an aligned HTML banner block? Skip until close,
+		// tracking nested banner opens so an inner <p align> doesn't let its
+		// </p> end the outer block early and leak the rest into the excerpt.
 		if htmlSkipDepth > 0 {
-			if hasHTMLClose(trimmed, "p") || hasHTMLClose(trimmed, "div") {
+			opens := alignBannerOpen(trimmed)
+			closes := hasHTMLClose(trimmed, "p") || hasHTMLClose(trimmed, "div")
+			switch {
+			case opens && !closes:
+				htmlSkipDepth++
+			case closes && !opens:
 				htmlSkipDepth--
 			}
 			continue
 		}
 		// Opening a <p align> / <div align> block → skip until close.
-		if openIdx := alignBannerOpen(trimmed); openIdx {
+		if alignBannerOpen(trimmed) {
 			if !(hasHTMLClose(trimmed, "p") || hasHTMLClose(trimmed, "div")) {
 				htmlSkipDepth++
 			}
@@ -339,10 +366,27 @@ func Excerpt(content string) string {
 // prose, so we always drop the whole block.
 func alignBannerOpen(line string) bool {
 	low := strings.ToLower(line)
-	if !strings.HasPrefix(low, "<p") && !strings.HasPrefix(low, "<div") {
+	if !hasTagPrefix(low, "p") && !hasTagPrefix(low, "div") {
 		return false
 	}
 	return strings.Contains(low, "align=") || strings.Contains(low, `style="text-align`)
+}
+
+// hasTagPrefix reports whether the (lowercased) line starts with the given
+// HTML tag at a tag boundary — "<p " matches, "<pre" does not.
+func hasTagPrefix(low, tag string) bool {
+	if !strings.HasPrefix(low, "<"+tag) {
+		return false
+	}
+	rest := low[len(tag)+1:]
+	if rest == "" {
+		return true
+	}
+	switch rest[0] {
+	case ' ', '\t', '>', '/':
+		return true
+	}
+	return false
 }
 
 // isContentlessHTML returns true if the line is structural HTML with no
@@ -442,26 +486,6 @@ var (
 	htmlLinkedImageRe = regexp.MustCompile(`^(\s*<a\b[^>]*>\s*<img\b[^>]*/?>\s*(</a>\s*)+)+$`)
 )
 
-func hasHTMLOpen(line, tag string) bool {
-	return strings.HasPrefix(strings.ToLower(line), "<"+tag) ||
-		strings.HasPrefix(strings.ToLower(line), "<"+tag+">")
-}
-
 func hasHTMLClose(line, tag string) bool {
 	return strings.Contains(strings.ToLower(line), "</"+tag+">")
-}
-
-func hasBadgeOrImage(line string) bool {
-	low := strings.ToLower(line)
-	return strings.Contains(low, "<img") ||
-		strings.Contains(low, "shields.io") ||
-		strings.Contains(low, "badgen.net")
-}
-
-// isHTMLAlignWrapper catches the "<p align=\"center\">…<img…/>…</p>"
-// pattern used to center badges. Conservative: only matches when the line
-// contains an align attribute AND something image-y.
-func isHTMLAlignWrapper(line string) bool {
-	low := strings.ToLower(line)
-	return strings.Contains(low, "align=") && hasBadgeOrImage(line)
 }

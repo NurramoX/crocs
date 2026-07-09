@@ -52,7 +52,7 @@ var treeCmd = &cobra.Command{
 }
 
 func init() {
-	treeCmd.Flags().StringSliceVarP(&treeIncludes, "include", "i", nil, "include only paths starting with this prefix (repeatable)")
-	treeCmd.Flags().StringSliceVarP(&treeExcludes, "exclude", "e", nil, "exclude paths starting with this prefix (repeatable)")
+	treeCmd.Flags().StringSliceVarP(&treeIncludes, "include", "i", nil, "include only paths under this path (repeatable)")
+	treeCmd.Flags().StringSliceVarP(&treeExcludes, "exclude", "e", nil, "exclude paths under this path (repeatable)")
 	rootCmd.AddCommand(treeCmd)
 }
