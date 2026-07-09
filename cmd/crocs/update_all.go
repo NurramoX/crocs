@@ -63,18 +63,11 @@ var updateAllCmd = &cobra.Command{
 			// "the git state didn't advance" when it did.
 			item.OK = true
 			item.Ref = ref
-			after, _ := vcs.HeadHash(p.Path)
-			item.Changed = before == "" || after == "" || before != after
-			if item.Changed || p.ParsedAt == nil {
-				nSym, perr := reparseProject(ctx, db, p)
-				if perr != nil {
-					item.ReindexError = perr.Error()
-				}
-				item.SymbolCount = nSym
-			} else {
-				if nSym, cerr := db.CountSymbols(ctx, p.Name); cerr == nil {
-					item.SymbolCount = nSym
-				}
+			changed, nSym, perr := syncAfterPull(ctx, db, p, before)
+			item.Changed = changed
+			item.SymbolCount = nSym
+			if perr != nil {
+				item.ReindexError = perr.Error()
 			}
 			resp.Updated = append(resp.Updated, item)
 		}

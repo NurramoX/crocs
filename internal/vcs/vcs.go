@@ -382,7 +382,7 @@ type DiffOptions struct {
 // Diff returns a unified diff in repoDir. Ref semantics follow git:
 // From+To = From..To, From alone = From against the working tree, To alone
 // = To against the working tree, neither = unstaged changes.
-func Diff(repoDir string, opts DiffOptions) (string, error) {
+func Diff(ctx context.Context, repoDir string, opts DiffOptions) (string, error) {
 	if !HasGit() {
 		return "", errors.New("vcs.Diff: requires git CLI on $PATH")
 	}
@@ -402,7 +402,7 @@ func Diff(repoDir string, opts DiffOptions) (string, error) {
 		args = append(args, "--")
 		args = append(args, opts.Paths...)
 	}
-	cmd := exec.Command("git", args...)
+	cmd := exec.CommandContext(ctx, "git", args...)
 	out, err := cmd.Output()
 	if err != nil {
 		var ee *exec.ExitError
@@ -475,9 +475,22 @@ func Unshallow(ctx context.Context, repoDir string) error {
 	if !HasGit() {
 		return errors.New("vcs.Unshallow: requires git CLI on $PATH")
 	}
-	if err := runGit(ctx, repoDir, "fetch", "--unshallow"); err != nil {
-		// "--unshallow on a complete repository does not make sense" is fine.
+	// A --depth=1 clone is also single-branch: its fetch refspec names only
+	// the cloned branch, so `fetch --unshallow` alone would deepen history
+	// without ever surfacing the other remote branches (or tags reachable
+	// only from them). Widen the refspec first so the fetch below delivers
+	// what the shallow-clone hints promise.
+	if err := runGit(ctx, repoDir, "config", "remote.origin.fetch",
+		"+refs/heads/*:refs/remotes/origin/*"); err != nil {
+		return err
+	}
+	if err := runGit(ctx, repoDir, "fetch", "--unshallow", "--tags", "origin"); err != nil {
+		// "--unshallow on a complete repository does not make sense" is fine —
+		// but still fetch, so the widened refspec takes effect on such repos.
 		if !strings.Contains(err.Error(), "does not make sense") {
+			return err
+		}
+		if err := runGit(ctx, repoDir, "fetch", "--tags", "origin"); err != nil {
 			return err
 		}
 	}

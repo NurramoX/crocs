@@ -24,7 +24,7 @@ type Filters struct {
 // match reports whether a relative path matches the filter set.
 func (f Filters) match(rel string) bool {
 	for _, e := range f.Excludes {
-		if matchPrefix(rel, e) {
+		if MatchPrefix(rel, e) {
 			return false
 		}
 	}
@@ -32,14 +32,18 @@ func (f Filters) match(rel string) bool {
 		return true
 	}
 	for _, p := range f.Includes {
-		if matchPrefix(rel, p) {
+		if MatchPrefix(rel, p) {
 			return true
 		}
 	}
 	return false
 }
 
-func matchPrefix(rel, pat string) bool {
+// MatchPrefix reports whether pat names rel itself or an ancestor directory
+// of it, segment-aware: `src` matches `src/a.py` and `src`, not `src2/b.py`.
+// grepx uses the same predicate for its literal -i/-e filters so both
+// backends agree on what a bare path means.
+func MatchPrefix(rel, pat string) bool {
 	if pat == "" {
 		return false
 	}
@@ -53,13 +57,13 @@ var defaultSkipDirs = map[string]struct{}{
 	".git": {},
 }
 
-// Walk returns every file path under root that survives the filter set.
-// Paths are slash-separated and relative to root. .git/ is unconditionally
-// pruned. Unreadable subdirectories are skipped, not fatal — one bad
-// permission bit must not blank out the whole listing.
-func Walk(root string, f Filters) ([]string, error) {
-	var out []string
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+// WalkFiles calls fn for every regular file under root with its
+// slash-separated root-relative path. .git/ is unconditionally pruned.
+// Unreadable subdirectories are skipped, not fatal — one bad permission bit
+// must not blank out the whole listing. This is the walk shared by tree/map/
+// detect (via Walk) and the grep fallback engine.
+func WalkFiles(root string, fn func(rel, abs string, d fs.DirEntry)) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if path == root {
 				return err
@@ -82,12 +86,19 @@ func Walk(root string, f Filters) ([]string, error) {
 		if err != nil {
 			return err
 		}
-		rel = filepath.ToSlash(rel)
-		if !f.match(rel) {
-			return nil
-		}
-		out = append(out, rel)
+		fn(filepath.ToSlash(rel), path, d)
 		return nil
+	})
+}
+
+// Walk returns every file path under root that survives the filter set,
+// sorted. See WalkFiles for the walk semantics.
+func Walk(root string, f Filters) ([]string, error) {
+	var out []string
+	err := WalkFiles(root, func(rel, _ string, _ fs.DirEntry) {
+		if f.match(rel) {
+			out = append(out, rel)
+		}
 	})
 	if err != nil {
 		return nil, err

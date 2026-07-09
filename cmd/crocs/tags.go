@@ -1,8 +1,6 @@
 package main
 
 import (
-	"fmt"
-
 	"crocs/internal/output"
 	"crocs/internal/vcs"
 
@@ -42,16 +40,12 @@ var tagsCmd = &cobra.Command{
 		if tags == nil {
 			tags = []vcs.Tag{}
 		}
-		truncated := false
-		if tagsLimit > 0 && len(tags) > tagsLimit {
-			tags = tags[:tagsLimit]
-			truncated = true
-		}
+		tags, truncated := capList(tags, tagsLimit)
 		hint := ""
 		if p.Shallow {
 			// The single most misleading output in the old CLI: a confident
 			// empty tag list on every fresh clone. Say why it's empty.
-			hint = fmt.Sprintf("shallow clone: tags were not fetched; run `crocs unshallow %s` to get them", p.Name)
+			hint = shallowHint(p.Name, "tags were not fetched")
 		}
 		return output.Write(cmd.OutOrStdout(), "tags", tagsResponse{
 			Name:      p.Name,

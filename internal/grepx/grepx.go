@@ -13,12 +13,13 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
 	"strings"
 	"sync"
+
+	"crocs/internal/treemap"
 )
 
 // Options controls a single grep call.
@@ -273,45 +274,20 @@ func runGo(ctx context.Context, root string, opts Options) (Result, error) {
 		size int64
 	}
 	var jobs []job
-	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			// One unreadable directory must not abort the whole search.
-			if path == root {
-				return err
-			}
-			if d != nil && d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.Name() == ".git" && path != root {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil // gitlink file (submodule/worktree)
-		}
-		if d.IsDir() {
-			return nil
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
+	walkErr := treemap.WalkFiles(root, func(rel, abs string, d fs.DirEntry) {
 		if !pathMatches(rel, opts.Includes, opts.Excludes) {
-			return nil
+			return
 		}
 		info, ierr := d.Info()
 		if ierr != nil {
-			return nil
+			return
 		}
 		// Skip absurdly large files (>10MB) — they're typically build artifacts
 		// or vendored blobs and would dominate the scan.
 		if info.Size() > 10<<20 {
-			return nil
+			return
 		}
-		jobs = append(jobs, job{rel: rel, abs: path, size: info.Size()})
-		return nil
+		jobs = append(jobs, job{rel: rel, abs: abs, size: info.Size()})
 	})
 	if walkErr != nil {
 		return Result{}, walkErr
@@ -461,14 +437,13 @@ func pathMatches(rel string, includes, excludes []string) bool {
 }
 
 // matchOne mirrors makeRGGlobs for the Go backend: glob-looking patterns
-// match as globs; literal paths match themselves or their directory
-// contents, segment-aware (so `src` matches `src/a.py` but not `src2/b.py`).
+// match as globs; literal paths use treemap's segment-aware prefix predicate
+// (so `src` matches `src/a.py` but not `src2/b.py`).
 func matchOne(rel, pat string) bool {
 	if strings.ContainsAny(pat, "*?[") {
 		return globMatchPath(rel, pat)
 	}
-	pat = strings.TrimSuffix(pat, "/")
-	return rel == pat || strings.HasPrefix(rel, pat+"/")
+	return treemap.MatchPrefix(rel, pat)
 }
 
 // globMatchPath evaluates a ripgrep-style glob against a slash-separated

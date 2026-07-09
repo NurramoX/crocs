@@ -6,6 +6,7 @@ import (
 
 	"crocs/internal/registry"
 	"crocs/internal/symbols"
+	"crocs/internal/vcs"
 )
 
 // reparseProject is the canonical "the snapshot just changed, refresh the
@@ -41,4 +42,23 @@ func reparseProject(ctx context.Context, db *registry.DB, p registry.Project) (i
 		return 0, fmt.Errorf("persist symbols: %w", err)
 	}
 	return len(rows), nil
+}
+
+// syncAfterPull decides, after a pull, whether the symbol index must be
+// rebuilt: yes when HEAD moved away from before, when either hash read
+// failed (reindexing needlessly is safe, serving a stale index is not), or
+// when the project was never indexed. Returns whether HEAD moved, the
+// symbol count, and any reindex error. Shared by update and update-all.
+func syncAfterPull(ctx context.Context, db *registry.DB, p registry.Project, before string) (changed bool, nSym int, reindexErr error) {
+	after, _ := vcs.HeadHash(p.Path)
+	changed = before == "" || after == "" || before != after
+	if changed || p.ParsedAt == nil {
+		nSym, reindexErr = reparseProject(ctx, db, p)
+		return changed, nSym, reindexErr
+	}
+	// HEAD didn't move; the persisted index is still valid.
+	if n, err := db.CountSymbols(ctx, p.Name); err == nil {
+		nSym = n
+	}
+	return changed, nSym, nil
 }

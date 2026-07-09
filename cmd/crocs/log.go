@@ -1,8 +1,6 @@
 package main
 
 import (
-	"fmt"
-
 	"crocs/internal/output"
 	"crocs/internal/vcs"
 
@@ -43,7 +41,7 @@ var logCmd = &cobra.Command{
 		}
 		hint := ""
 		if p.Shallow {
-			hint = fmt.Sprintf("shallow clone: history is truncated at fetch depth; run `crocs unshallow %s` for full history", p.Name)
+			hint = shallowHint(p.Name, "history is truncated at fetch depth")
 		}
 		return output.Write(cmd.OutOrStdout(), "log", logResponse{
 			Name:    p.Name,

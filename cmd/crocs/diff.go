@@ -47,7 +47,7 @@ scope the diff. Output is capped at --max-kb (truncated flag set when hit).`,
 		if err != nil {
 			return err
 		}
-		d, err := vcs.Diff(p.Path, vcs.DiffOptions{
+		d, err := vcs.Diff(ctx, p.Path, vcs.DiffOptions{
 			From:  diffFrom,
 			To:    diffTo,
 			Stat:  diffStat,
@@ -67,7 +67,7 @@ scope the diff. Output is capped at --max-kb (truncated flag set when hit).`,
 		}
 		hint := ""
 		if p.Shallow {
-			hint = fmt.Sprintf("shallow clone: only fetched refs exist; run `crocs unshallow %s` for full history", p.Name)
+			hint = shallowHint(p.Name, "only fetched refs exist")
 		}
 		return output.Write(cmd.OutOrStdout(), "diff", diffResponse{
 			Name:      p.Name,

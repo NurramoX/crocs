@@ -76,7 +76,8 @@ func init() {
 
 func runSymbols(cmd *cobra.Command, args []string) error {
 	ctx := cmdCtx(cmd)
-	if _, err := parseLangs(); err != nil {
+	langs, err := parseLangs()
+	if err != nil {
 		return err
 	}
 	db, err := openRegistry(ctx)
@@ -89,11 +90,11 @@ func runSymbols(cmd *cobra.Command, args []string) error {
 	case symPath != "" && len(args) != 1:
 		return errors.New("-p/--path requires a positional project name")
 	case symPath != "":
-		return symbolsForFile(ctx, cmd, db, args[0], symPath)
+		return symbolsForFile(ctx, cmd, db, args[0], symPath, langs)
 	case len(args) == 1:
-		return symbolsForProject(ctx, cmd, db, args[0])
+		return symbolsForProject(ctx, cmd, db, args[0], langs)
 	default:
-		return symbolsCrossProject(ctx, cmd, db)
+		return symbolsCrossProject(ctx, cmd, db, langs)
 	}
 }
 
@@ -102,7 +103,7 @@ func runSymbols(cmd *cobra.Command, args []string) error {
 // takes a few ms to parse, fast enough not to bother reading the db. This
 // also means `symbols -p X.go` works even on projects whose parsed_at is
 // still NULL (e.g. fetched before this binary added eager parse).
-func symbolsForFile(ctx context.Context, cmd *cobra.Command, db *registry.DB, name, rel string) error {
+func symbolsForFile(ctx context.Context, cmd *cobra.Command, db *registry.DB, name, rel string, langs []string) error {
 	p, err := requireProject(ctx, db, name)
 	if err != nil {
 		return err
@@ -120,11 +121,10 @@ func symbolsForFile(ctx context.Context, cmd *cobra.Command, db *registry.DB, na
 		return err
 	}
 	kinds := flatten(symKinds)
-	langs, _ := parseLangs() // already validated in runSymbols
 	recs := make([]symbolRecord, 0, len(fs.Symbols))
 	truncated := false
 	for _, s := range fs.Symbols {
-		if !matchesFilters(s.Name, s.Kind, s.Lang, kinds, langs) {
+		if !matchesFilters(s.Name, s.Kind, s.Lang, symNamePat, kinds, langs) {
 			continue
 		}
 		if symLimit > 0 && len(recs) >= symLimit {
@@ -149,12 +149,12 @@ func symbolsForFile(ctx context.Context, cmd *cobra.Command, db *registry.DB, na
 	})
 }
 
-func symbolsForProject(ctx context.Context, cmd *cobra.Command, db *registry.DB, name string) error {
+func symbolsForProject(ctx context.Context, cmd *cobra.Command, db *registry.DB, name string, langs []string) error {
 	p, err := requireProject(ctx, db, name)
 	if err != nil {
 		return err
 	}
-	q := buildQuery([]string{p.Name})
+	q := buildQuery([]string{p.Name}, langs)
 	rows, err := db.FindSymbols(ctx, q)
 	if err != nil {
 		return err
@@ -168,7 +168,7 @@ func symbolsForProject(ctx context.Context, cmd *cobra.Command, db *registry.DB,
 	})
 }
 
-func symbolsCrossProject(ctx context.Context, cmd *cobra.Command, db *registry.DB) error {
+func symbolsCrossProject(ctx context.Context, cmd *cobra.Command, db *registry.DB, langs []string) error {
 	// Determine the project universe: either user-specified --projects, or
 	// every tracked project. We require at least one narrowing filter
 	// (--name, --kind, --lang) to keep cross-project from returning
@@ -186,7 +186,7 @@ func symbolsCrossProject(ctx context.Context, cmd *cobra.Command, db *registry.D
 			projects = append(projects, p.Name)
 		}
 	}
-	q := buildQuery(projects)
+	q := buildQuery(projects, langs)
 	rows, err := db.FindSymbols(ctx, q)
 	if err != nil {
 		return err
@@ -199,8 +199,7 @@ func symbolsCrossProject(ctx context.Context, cmd *cobra.Command, db *registry.D
 	})
 }
 
-func buildQuery(projects []string) registry.SymbolQuery {
-	langs, _ := parseLangs() // already validated in runSymbols
+func buildQuery(projects, langs []string) registry.SymbolQuery {
 	return registry.SymbolQuery{
 		Projects:    projects,
 		NamePattern: registry.NormalizeGlob(symNamePat),
@@ -286,9 +285,9 @@ func flatten(vals []string) []string {
 
 // matchesFilters applies the in-memory equivalents of the SQL filters,
 // used by the -p file path where we don't hit the db.
-func matchesFilters(name, kind, lang string, kinds, langs []string) bool {
-	if symNamePat != "" {
-		if !globMatch(name, symNamePat) {
+func matchesFilters(name, kind, lang, namePat string, kinds, langs []string) bool {
+	if namePat != "" {
+		if !globMatch(name, namePat) {
 			return false
 		}
 	}

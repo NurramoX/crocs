@@ -268,7 +268,7 @@ The default fetch is a **shallow single-branch clone** — fast, but it means
 can't reach other refs. To answer "as of release X" questions:
 
 ```
-crocs unshallow <name>             # one-time: fetch full history + tags
+crocs unshallow <name>             # one-time: fetch full history, all branches + tags
 crocs tags <name> -n 20            # discover release refs
 crocs checkout <name> v2.3.0       # switch snapshot + rebuild the symbol index
 crocs diff <name> --from v2.2.0 --to v2.3.0 --stat   # what changed between releases

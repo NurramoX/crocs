@@ -3,8 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"crocs/internal/output"
 	"crocs/internal/project"
@@ -43,7 +41,7 @@ var removeCmd = &cobra.Command{
 		// managed projects root — a corrupted or hand-edited row must never
 		// turn remove into an arbitrary `rm -rf`.
 		diskErr := ""
-		if within, err := underProjectsRoot(p.Path); err != nil {
+		if within, err := project.UnderProjectsRoot(p.Path); err != nil {
 			diskErr = "verify clone path: " + err.Error()
 		} else if !within {
 			diskErr = fmt.Sprintf("refusing to delete %s: outside the managed projects root", p.Path)
@@ -61,23 +59,6 @@ var removeCmd = &cobra.Command{
 			DiskError: diskErr,
 		})
 	},
-}
-
-// underProjectsRoot reports whether path is a strict descendant of the
-// managed projects root.
-func underProjectsRoot(path string) (bool, error) {
-	root, err := project.ProjectsRoot()
-	if err != nil {
-		return false, err
-	}
-	rel, err := filepath.Rel(root, filepath.Clean(path))
-	if err != nil {
-		return false, err
-	}
-	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return false, nil
-	}
-	return true, nil
 }
 
 func init() {

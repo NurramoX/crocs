@@ -17,10 +17,11 @@ type unshallowResponse struct {
 var unshallowCmd = &cobra.Command{
 	Use:   "unshallow <name>",
 	Short: "Convert a shallow/blobless clone to full history",
-	Long: `Fetch the full history for a shallow clone and drop the blob filter. This
-un-cripples branches/tags/log/diff/checkout, which see only the fetched ref
-on the default clone. The working tree does not change, so the symbol index
-is left as-is (it is built only if missing).`,
+	Long: `Fetch the full history, all remote branches, and all tags for a shallow
+clone, and drop the blob filter. This un-cripples branches/tags/log/diff/
+checkout, which see only the fetched ref on the default single-branch clone.
+The working tree does not change, so the symbol index is left as-is (it is
+built only if missing).`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmdCtx(cmd)

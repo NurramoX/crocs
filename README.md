@@ -49,12 +49,12 @@ crocs symbols --name Complete --kind function,method
 | **Orient** | `summary`, `tree`, `map`, `detect` |
 | **Query** | `grep`, `read-files`, `symbols` |
 | **VCS** | `branches`, `tags`, `log`, `diff`, `checkout`, `update`, `update-all`, `unshallow` |
+| **Skill** | `install-skill` |
 
 The default fetch is a shallow single-branch clone, so `branches`/`tags`/
 `log` see only the fetched ref until `crocs unshallow <name>` — their JSON
 carries `"shallow": true` plus a hint when that's the case, and `checkout`/
 `diff` errors say so explicitly.
-| **Skill** | `install-skill` |
 
 Run `crocs <command> --help` for flags.
 

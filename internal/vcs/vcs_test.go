@@ -98,7 +98,7 @@ func TestDiffFromOnly(t *testing.T) {
 	dir, _, _ := initRepo(t)
 	// --from alone must diff the ref against the working tree — this was
 	// silently ignored before.
-	d, err := Diff(dir, DiffOptions{From: "v1-light"})
+	d, err := Diff(t.Context(), dir, DiffOptions{From: "v1-light"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestDiffFromOnly(t *testing.T) {
 		t.Errorf("from-only diff missing the change:\n%s", d)
 	}
 	// from..to
-	d, err = Diff(dir, DiffOptions{From: "v1-light", To: "HEAD"})
+	d, err = Diff(t.Context(), dir, DiffOptions{From: "v1-light", To: "HEAD"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestDiffFromOnly(t *testing.T) {
 		t.Errorf("from..to diff missing the change:\n%s", d)
 	}
 	// --stat
-	d, err = Diff(dir, DiffOptions{From: "v1-light", Stat: true})
+	d, err = Diff(t.Context(), dir, DiffOptions{From: "v1-light", Stat: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestDiffFromOnly(t *testing.T) {
 		t.Errorf("stat diff missing summary:\n%s", d)
 	}
 	// path scoping to a file the change doesn't touch
-	d, err = Diff(dir, DiffOptions{From: "v1-light", Paths: []string{"nope.txt"}})
+	d, err = Diff(t.Context(), dir, DiffOptions{From: "v1-light", Paths: []string{"nope.txt"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestDiffFromOnly(t *testing.T) {
 
 func TestDiffBadRefSurfacesStderr(t *testing.T) {
 	dir, _, _ := initRepo(t)
-	_, err := Diff(dir, DiffOptions{From: "no-such-ref", To: "HEAD"})
+	_, err := Diff(t.Context(), dir, DiffOptions{From: "no-such-ref", To: "HEAD"})
 	if err == nil {
 		t.Fatal("expected error for unknown ref")
 	}

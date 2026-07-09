@@ -46,11 +46,12 @@ type Request struct {
 // quoting flags keep working.
 const DefaultMaxSizeKB = 100
 
-// rangedReadMaxBytes is the hard size cap applied when the caller requested
-// a --lines range. The emitted output is bounded by the range, not the file,
-// so the whole-file --max-size guard would only force agents to bump a flag
-// to read 50 lines of a 300KB file. Memory is the remaining concern; 10MB
-// mirrors grepx's large-file cutoff.
+// rangedReadMaxBytes is the size *floor* applied when the caller requested
+// a --lines range: the effective limit is raised to it, and an explicit
+// larger --max-size still wins. The emitted output is bounded by the range,
+// not the file, so the whole-file --max-size guard would only force agents
+// to bump a flag to read 50 lines of a 300KB file. Memory is the remaining
+// concern; 10MB mirrors grepx's large-file cutoff.
 const rangedReadMaxBytes = 10 << 20
 
 // SchemaVersion is the value of the `crocs` attribute on the root <files>

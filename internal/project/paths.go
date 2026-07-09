@@ -4,7 +4,9 @@
 package project
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -100,8 +102,10 @@ func NameFromURL(url string) string {
 // "../../../../etc/passwd" — or an in-repo symlink pointing outside the
 // clone — becomes a read primitive over the whole filesystem.
 //
-// The returned path is the cleaned root+rel join (not symlink-resolved), so
-// callers keep emitting the path the user asked for. A nonexistent path is
+// The returned path is the symlink-resolved one, and callers must read
+// through it — reading the unresolved join would reopen the window between
+// this check and the read, where a component can be swapped for a symlink.
+// Callers keep emitting rel, so output is unaffected. A nonexistent path is
 // not an error here; the caller's stat/read reports it in its usual shape.
 func ResolveInRoot(root, rel string) (string, error) {
 	if filepath.IsAbs(rel) {
@@ -117,15 +121,27 @@ func ResolveInRoot(root, rel string) (string, error) {
 	}
 	resolved, err := filepath.EvalSymlinks(abs)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return abs, nil
 		}
 		return "", err
 	}
-	if resolvedRoot != resolved && !isWithin(resolvedRoot, resolved) {
+	if !isWithin(resolvedRoot, resolved) {
 		return "", fmt.Errorf("%s: resolves outside the project root", rel)
 	}
-	return abs, nil
+	return resolved, nil
+}
+
+// UnderProjectsRoot reports whether path is a strict descendant of the
+// managed projects root. remove uses this so a corrupted or hand-edited
+// registry row can never turn a delete into an arbitrary `rm -rf`.
+func UnderProjectsRoot(path string) (bool, error) {
+	root, err := ProjectsRoot()
+	if err != nil {
+		return false, err
+	}
+	clean := filepath.Clean(path)
+	return clean != root && isWithin(root, clean), nil
 }
 
 // isWithin reports whether path is root itself or a descendant of it. Both

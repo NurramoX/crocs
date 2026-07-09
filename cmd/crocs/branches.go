@@ -1,8 +1,6 @@
 package main
 
 import (
-	"fmt"
-
 	"crocs/internal/output"
 	"crocs/internal/vcs"
 
@@ -42,14 +40,10 @@ var branchesCmd = &cobra.Command{
 		if branches == nil {
 			branches = []vcs.Branch{}
 		}
-		truncated := false
-		if branchesLimit > 0 && len(branches) > branchesLimit {
-			branches = branches[:branchesLimit]
-			truncated = true
-		}
+		branches, truncated := capList(branches, branchesLimit)
 		hint := ""
 		if p.Shallow {
-			hint = fmt.Sprintf("shallow single-branch clone: remote branches were not fetched; run `crocs unshallow %s` to see them all", p.Name)
+			hint = shallowHint(p.Name, "remote branches were not fetched")
 		}
 		return output.Write(cmd.OutOrStdout(), "branches", branchesResponse{
 			Name:      p.Name,

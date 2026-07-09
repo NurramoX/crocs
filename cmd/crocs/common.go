@@ -72,3 +72,18 @@ func requireProject(ctx context.Context, db *registry.DB, name string) (registry
 	}
 	return p, err
 }
+
+// shallowHint is the standard hint VCS commands attach on shallow clones;
+// missing names what the shallow clone lacks for that command.
+func shallowHint(name, missing string) string {
+	return fmt.Sprintf("shallow clone: %s; run `crocs unshallow %s` to fetch the rest", missing, name)
+}
+
+// capList truncates list to limit entries (0 = no cap) and reports whether
+// it did. Shared --limit handling for branches/tags.
+func capList[T any](list []T, limit int) ([]T, bool) {
+	if limit > 0 && len(list) > limit {
+		return list[:limit], true
+	}
+	return list, false
+}

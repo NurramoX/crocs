@@ -45,22 +45,10 @@ var updateCmd = &cobra.Command{
 			return err
 		}
 
-		after, _ := vcs.HeadHash(p.Path)
-		changed := before == "" || after == "" || before != after
-		resp := updateResponse{Name: p.Name, Ref: ref, Changed: changed}
-		if changed || p.ParsedAt == nil {
-			// Snapshot moved (or was never indexed) → rebuild the index.
-			nSym, perr := reparseProject(ctx, db, p)
-			if perr != nil {
-				resp.ReindexError = perr.Error()
-			}
-			resp.SymbolCount = nSym
-		} else {
-			// HEAD didn't move; the persisted index is still valid.
-			nSym, cerr := db.CountSymbols(ctx, p.Name)
-			if cerr == nil {
-				resp.SymbolCount = nSym
-			}
+		changed, nSym, perr := syncAfterPull(ctx, db, p, before)
+		resp := updateResponse{Name: p.Name, Ref: ref, Changed: changed, SymbolCount: nSym}
+		if perr != nil {
+			resp.ReindexError = perr.Error()
 		}
 		return output.Write(cmd.OutOrStdout(), "update", resp)
 	},
