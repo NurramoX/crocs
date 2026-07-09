@@ -1,4 +1,4 @@
-// Package output owns the stable JSON envelope every crocs/crocs command
+// Package output owns the stable JSON envelope every crocs command
 // emits. PLAN.md §1 Breaking Change #1: top-level "_meta" with the schema
 // version key "crocs" and the invoking command name.
 //
@@ -22,9 +22,15 @@ import (
 // changes — that's a Breaking Change in MIGRATION.md.
 const SchemaVersion = "1"
 
-// MetaKey is the top-level envelope field name. Lifted to a constant so the
-// eventual rename from crocs to crocs is a one-line change.
+// MetaKey is the schema-version key inside "_meta". Lifted to a constant so
+// a future rename of the tool is a one-line change.
 const MetaKey = "crocs"
+
+// Compact disables the 2-space indentation of JSON output. Wired to the
+// global --compact flag: pretty output is the skim-able default, compact
+// saves ~30-50% of the envelope tokens on high-volume commands (grep,
+// symbols) whose primary consumers are token-metered agents.
+var Compact = false
 
 // Meta is the envelope's `_meta` value.
 type Meta struct {
@@ -107,7 +113,9 @@ func firstByte(b []byte) string {
 // when you want a single field at the top level.
 func Write(w io.Writer, cmd string, payload any) error {
 	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
+	if !Compact {
+		enc.SetIndent("", "  ")
+	}
 	// Avoid escaping & < > in URLs/HTML — agent consumers parse this raw, not
 	// in a browser.
 	enc.SetEscapeHTML(false)

@@ -18,12 +18,16 @@ var skillCmd = &cobra.Command{
 	Short: "Write the embedded crocs skill to a skills directory",
 	Long: `Write the embedded SKILL.md to <target>/crocs/SKILL.md so Claude Code (or
 any agent honoring the agent-skill convention) can pick it up. Default
-target is $HOME/.claude/skills/.
+target is $HOME/.claude/skills/. An existing SKILL.md at the target is
+overwritten.
 
 The skill is embedded into the binary at build time — this works on a
 binary obtained via "go install" with no source checkout needed.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if len(skill.Content) == 0 {
+			return fmt.Errorf("embedded SKILL.md is empty — rebuild with `make build` so `make prepare` stages the skill")
+		}
 		target := skillTarget
 		if target == "" {
 			home, err := os.UserHomeDir()

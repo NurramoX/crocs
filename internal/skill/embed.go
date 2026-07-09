@@ -5,10 +5,9 @@ package skill
 
 import _ "embed"
 
-// Content is the SKILL.md bytes. Empty in source builds before `make
-// prepare` has copied the file in; the binary still builds — the
-// install-skill subcommand will just write an empty file with a clear
-// stderr warning.
+// Content is the SKILL.md bytes. go:embed fails the build if the staged
+// file is missing, so Content can only be empty if an empty file was
+// staged — install-skill refuses to install in that case.
 //
 //go:embed SKILL.md
 var Content []byte

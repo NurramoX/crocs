@@ -1,5 +1,5 @@
 // Command crocs is a fast-primitives CLI for AI-driven code exploration. See
-// PLAN.md for the design and skills/SKILL.md for the consumer pattern.
+// PLAN.md for the design and skills/crocs/SKILL.md for the consumer pattern.
 package main
 
 import (
@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+
+	"crocs/internal/output"
 
 	"github.com/spf13/cobra"
 )
@@ -27,6 +29,11 @@ _meta.crocs for forward-compatible scripting.`,
 	Version:       version,
 	SilenceUsage:  true,
 	SilenceErrors: true,
+}
+
+func init() {
+	rootCmd.PersistentFlags().BoolVar(&output.Compact, "compact", false,
+		"emit compact (unindented) JSON — saves tokens on large grep/symbols output")
 }
 
 func main() {
