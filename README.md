@@ -49,6 +49,11 @@ crocs symbols --name Complete --kind function,method
 | **Orient** | `summary`, `tree`, `map`, `detect` |
 | **Query** | `grep`, `read-files`, `symbols` |
 | **VCS** | `branches`, `tags`, `log`, `diff`, `checkout`, `update`, `update-all`, `unshallow` |
+
+The default fetch is a shallow single-branch clone, so `branches`/`tags`/
+`log` see only the fetched ref until `crocs unshallow <name>` — their JSON
+carries `"shallow": true` plus a hint when that's the case, and `checkout`/
+`diff` errors say so explicitly.
 | **Skill** | `install-skill` |
 
 Run `crocs <command> --help` for flags.
@@ -65,7 +70,9 @@ Every command emits JSON to stdout with a top-level envelope:
 ```
 
 `_meta.crocs` is the schema version — branch on it for forward-compatible
-scripts. `_meta.command` is the invoking subcommand.
+scripts. `_meta.command` is the invoking subcommand. Pass the global
+`--compact` flag for unindented JSON (saves ~30-50% of the envelope tokens
+on large `grep`/`symbols` output).
 
 `read-files` is the sole carve-out and emits XML instead, because file
 bodies are easier to read and debug as plain text than as JSON-escaped

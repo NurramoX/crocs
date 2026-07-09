@@ -55,24 +55,31 @@ crocs fetch <git-url>              # clone + track a repo (do this once)
 crocs list                         # list tracked projects
 crocs summary <name>               # concise overview + semantic metadata + project shape
 crocs tree <name>                  # one file path per line
-crocs map <name>                   # directory heatmap (file counts) — find the dense dirs
-crocs detect <name>                # languages + metadata
+crocs map <name>                   # directory heatmap (file counts, non-recursive) — find the dense dirs
+crocs detect <name> [-i/-e path]   # language histogram, scopable to a subtree
 
 crocs grep <name> <pattern> [opts] # regex search
-    -i, --include TEXT             # only paths matching prefix/glob (repeatable)
-    -e, --exclude TEXT             # exclude paths matching prefix/glob (repeatable)
+    -i, --include TEXT             # only this path/dir or glob (repeatable; `src` ≠ `src2`)
+    -e, --exclude TEXT             # exclude a path/dir or glob (repeatable)
     -C, --context INTEGER          # lines of context around each match
     --max-results INTEGER          # cap (default 200)
-    -M, --multiline                # pattern may span lines
+    -M, --multiline                # pattern may span lines (. crosses newlines)
 
 crocs read-files <name> <paths...> [opts]   # bundle files as XML
-    --lines TEXT                   # range, e.g. 200-300
+    --lines TEXT                   # range, e.g. 200-300 (also lifts --max-size)
     --max-size INTEGER             # max file KB (default 100)
 
-crocs symbols <name> [opts]        # function/class/method defs
-    -p, --path TEXT                # one specific file
-    -i/-e include/exclude globs
+crocs symbols <name> -p <file>     # one file's function/class/method defs (parses fresh)
+crocs symbols <name> [filters]     # whole-project defs from the index
+crocs symbols [filters]            # cross-project index query (omit the name)
+    --name TEXT                    # symbol name: substring, glob (* ?), or LIKE (% _)
+    --kind TEXT                    # function,method,class,interface,struct,type,enum
+    --lang TEXT                    # go,python,typescript,tsx,java (comma-separated)
+    --limit INTEGER                # cap (default 500); --projects a,b scopes cross-project
 ```
+
+Every JSON command also takes a global `--compact` (unindented JSON — cheaper
+to read for large grep/symbols output).
 
 `crocs grep` is the candidate-finder. `crocs read-files` is the reader (use
 `--lines` to read a signature region instead of a whole large file). `crocs
@@ -252,6 +259,24 @@ Read `core` files first — they usually answer the question. Pull in `related`
 files only where the core files reference them; touch `speculative` files only
 if the picture is still incomplete after that. You spent ~3 files of context,
 not 80, and you have an accurate relevant set.
+
+## Version pinning & history (occasional)
+
+The default fetch is a **shallow single-branch clone** — fast, but it means
+`tags`/`branches`/`log` see only the fetched ref (their JSON says
+`"shallow": true` with a hint when that's the case) and `checkout`/`diff`
+can't reach other refs. To answer "as of release X" questions:
+
+```
+crocs unshallow <name>             # one-time: fetch full history + tags
+crocs tags <name> -n 20            # discover release refs
+crocs checkout <name> v2.3.0       # switch snapshot + rebuild the symbol index
+crocs diff <name> --from v2.2.0 --to v2.3.0 --stat   # what changed between releases
+```
+
+`crocs checkout` (not raw git) is the right tool here because it also
+reindexes symbols for the new snapshot. Skip this whole section for ordinary
+"how does X work today" research.
 
 ## Sharding large candidate sets
 
