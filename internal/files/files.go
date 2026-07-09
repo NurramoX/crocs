@@ -27,9 +27,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
+
+	"crocs/internal/grepx"
+	"crocs/internal/project"
 )
 
 // Request is one call to Bundle.
@@ -43,6 +45,13 @@ type Request struct {
 // DefaultMaxSizeKB matches the Python crocs default so subagent prompts
 // quoting flags keep working.
 const DefaultMaxSizeKB = 100
+
+// rangedReadMaxBytes is the hard size cap applied when the caller requested
+// a --lines range. The emitted output is bounded by the range, not the file,
+// so the whole-file --max-size guard would only force agents to bump a flag
+// to read 50 lines of a 300KB file. Memory is the remaining concern; 10MB
+// mirrors grepx's large-file cutoff.
+const rangedReadMaxBytes = 10 << 20
 
 // SchemaVersion is the value of the `crocs` attribute on the root <files>
 // element. Mirrors output.SchemaVersion (PLAN.md §2 #1).
@@ -70,7 +79,11 @@ func Bundle(w io.Writer, req Request) error {
 }
 
 func writeOne(w io.Writer, root, rel, lineRange string, maxBytes int64) error {
-	abs := filepath.Join(root, rel)
+	abs, err := project.ResolveInRoot(root, rel)
+	if err != nil {
+		writeErr(w, rel, err.Error())
+		return nil
+	}
 	info, err := os.Stat(abs)
 	if err != nil {
 		writeErr(w, rel, "stat: "+err.Error())
@@ -79,6 +92,11 @@ func writeOne(w io.Writer, root, rel, lineRange string, maxBytes int64) error {
 	if info.IsDir() {
 		writeErr(w, rel, "is a directory")
 		return nil
+	}
+	// A --lines request bounds the output by the range, so only the hard
+	// memory cap applies; whole-file reads keep the --max-size contract.
+	if lineRange != "" && maxBytes < rangedReadMaxBytes {
+		maxBytes = rangedReadMaxBytes
 	}
 	if info.Size() > maxBytes {
 		writeErr(w, rel, fmt.Sprintf("exceeds --max-size limit (%d bytes > %d bytes)",
@@ -91,8 +109,14 @@ func writeOne(w io.Writer, root, rel, lineRange string, maxBytes int64) error {
 		writeErr(w, rel, "read: "+err.Error())
 		return nil
 	}
+	if !grepx.IsProbablyText(data) {
+		// NUL bytes are illegal in XML 1.0 even inside CDATA — a raw binary
+		// body would render the whole document unparseable.
+		writeErr(w, rel, fmt.Sprintf("binary file (%d bytes), not emitted", len(data)))
+		return nil
+	}
 
-	start, end, err := parseLineRange(lineRange)
+	reqStart, reqEnd, err := parseLineRange(lineRange)
 	if err != nil {
 		writeErr(w, rel, "lines flag: "+err.Error())
 		return nil
@@ -101,6 +125,7 @@ func writeOne(w io.Writer, root, rel, lineRange string, maxBytes int64) error {
 	lines := splitLines(data)
 	totalLines := len(lines)
 
+	start, end := reqStart, reqEnd
 	if end == 0 || end > totalLines {
 		end = totalLines
 	}
@@ -108,9 +133,12 @@ func writeOne(w io.Writer, root, rel, lineRange string, maxBytes int64) error {
 		start = 1
 	}
 	if start > end {
-		// Empty slice — still emit an element so callers know the file was seen.
-		fmt.Fprintf(w, `  <file path=%s lines="%d-%d"/>`+"\n",
-			xmlAttr(rel), start-1, end)
+		// Requested range is entirely past EOF — emit an element so callers
+		// know the file was seen, with a note instead of a nonsense range.
+		fmt.Fprintf(w, `  <file path=%s note=%s/>`+"\n",
+			xmlAttr(rel), xmlAttr(fmt.Sprintf(
+				"requested lines %d-%d out of range: file has %d lines",
+				reqStart, reqEnd, totalLines)))
 		return nil
 	}
 
@@ -180,6 +208,10 @@ func splitLines(data []byte) []string {
 	out := strings.Split(s, "\n")
 	if len(out) > 0 && out[len(out)-1] == "" {
 		out = out[:len(out)-1]
+	}
+	// CRLF files: the \r is invisible noise inside CDATA — drop it.
+	for i, l := range out {
+		out[i] = strings.TrimSuffix(l, "\r")
 	}
 	return out
 }

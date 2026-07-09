@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"time"
 
@@ -15,9 +16,11 @@ import (
 )
 
 type fetchResponse struct {
-	Project     projectJSON `json:"project"`
-	Engine      string      `json:"engine"`
-	SymbolCount int         `json:"symbol_count"`
+	Project      projectJSON `json:"project"`
+	Engine       string      `json:"engine"`
+	SymbolCount  int         `json:"symbol_count"`
+	RefError     string      `json:"ref_error,omitempty"`
+	ReindexError string      `json:"reindex_error,omitempty"`
 }
 
 var (
@@ -40,9 +43,12 @@ git CLI is available); use --full for a complete history.`,
 		name := fetchName
 		if name == "" {
 			name = project.NameFromURL(url)
+			if name == "" {
+				return fmt.Errorf("could not infer a project name from URL %q; pass --name", url)
+			}
 		}
-		if name == "" {
-			return fmt.Errorf("could not infer a project name from URL %q; pass --name", url)
+		if err := project.ValidateName(name); err != nil {
+			return err
 		}
 
 		db, err := openRegistry(ctx)
@@ -63,6 +69,8 @@ git CLI is available); use --full for a complete history.`,
 		}
 		if _, err := os.Stat(dest); err == nil {
 			return fmt.Errorf("clone destination %s already exists on disk; pass --name or remove the directory first", dest)
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("stat clone destination %s: %w", dest, err)
 		}
 
 		res, err := vcs.Clone(ctx, vcs.CloneOptions{
@@ -77,9 +85,11 @@ git CLI is available); use --full for a complete history.`,
 		}
 
 		ref, refErr := vcs.CurrentRef(dest)
+		resp := fetchResponse{Engine: res.Engine}
 		if refErr != nil {
-			// Non-fatal: we still tracked the repo. Surface in the response.
+			// Non-fatal: we still track the repo, just without a default_ref.
 			ref = ""
+			resp.RefError = refErr.Error()
 		}
 
 		p := registry.Project{
@@ -91,6 +101,11 @@ git CLI is available); use --full for a complete history.`,
 			FetchedAt:  time.Now().UTC(),
 		}
 		if err := db.InsertProject(ctx, p); err != nil {
+			// Don't strand the fresh clone on disk: an orphaned directory
+			// blocks the next fetch of the same name.
+			if rmErr := os.RemoveAll(dest); rmErr != nil {
+				fmt.Fprintln(cmd.ErrOrStderr(), "crocs: cleanup of failed fetch left", dest, "behind:", rmErr)
+			}
 			return fmt.Errorf("register project: %w", err)
 		}
 
@@ -99,9 +114,8 @@ git CLI is available); use --full for a complete history.`,
 		nSym, err := reparseProject(ctx, db, p)
 		if err != nil {
 			// Symbol indexing failure is non-fatal: the clone is on disk and
-			// registered, so grep/read-files still work. Surface in stderr so
-			// the user knows the index is empty.
-			fmt.Fprintln(cmd.ErrOrStderr(), "crocs: symbol index build failed:", err)
+			// registered, so grep/read-files still work.
+			resp.ReindexError = err.Error()
 		}
 
 		// Reload to pick up parsed_at updated by ReplaceSymbols.
@@ -109,11 +123,9 @@ git CLI is available); use --full for a complete history.`,
 			p = refreshed
 		}
 
-		return output.Write(cmd.OutOrStdout(), "fetch", fetchResponse{
-			Project:     projectToJSON(p),
-			Engine:      res.Engine,
-			SymbolCount: nSym,
-		})
+		resp.Project = projectToJSON(p)
+		resp.SymbolCount = nSym
+		return output.Write(cmd.OutOrStdout(), "fetch", resp)
 	},
 }
 

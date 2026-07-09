@@ -132,6 +132,103 @@ func TestBundleMissingFile(t *testing.T) {
 	}
 }
 
+func TestBundleRejectsTraversal(t *testing.T) {
+	root, _ := mkFixture(t, "inner.txt", "safe\n")
+	var buf bytes.Buffer
+	err := Bundle(&buf, Request{Root: root, Paths: []string{"../../../../etc/passwd", "/etc/passwd"}})
+	if err != nil {
+		t.Fatalf("Bundle: %v", err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "root:") {
+		t.Fatalf("traversal path was read:\n%s", out)
+	}
+	if got := strings.Count(out, "error="); got != 2 {
+		t.Errorf("expected 2 error= entries for escaping paths, got %d:\n%s", got, out)
+	}
+}
+
+func TestBundleRejectsSymlinkEscape(t *testing.T) {
+	root, _ := mkFixture(t, "inner.txt", "safe\n")
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("secret\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "link.txt")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := Bundle(&buf, Request{Root: root, Paths: []string{"link.txt"}}); err != nil {
+		t.Fatalf("Bundle: %v", err)
+	}
+	if strings.Contains(buf.String(), "secret") {
+		t.Errorf("symlink escape was read:\n%s", buf.String())
+	}
+}
+
+func TestBundleBinarySkipped(t *testing.T) {
+	root, rel := mkFixture(t, "blob.bin", "PK\x03\x04\x00\x00binary")
+	var buf bytes.Buffer
+	if err := Bundle(&buf, Request{Root: root, Paths: []string{rel}}); err != nil {
+		t.Fatalf("Bundle: %v", err)
+	}
+	if !strings.Contains(buf.String(), "binary file") {
+		t.Errorf("expected binary-file error entry:\n%s", buf.String())
+	}
+	var probe struct {
+		XMLName xml.Name `xml:"files"`
+	}
+	if err := xml.Unmarshal(buf.Bytes(), &probe); err != nil {
+		t.Fatalf("binary output broke XML: %v", err)
+	}
+}
+
+func TestBundleRangePastEOF(t *testing.T) {
+	root, rel := mkFixture(t, "short.txt", "one\ntwo\n")
+	var buf bytes.Buffer
+	if err := Bundle(&buf, Request{Root: root, Paths: []string{rel}, LineRange: "500-510"}); err != nil {
+		t.Fatalf("Bundle: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "out of range") || !strings.Contains(out, "file has 2 lines") {
+		t.Errorf("expected out-of-range note:\n%s", out)
+	}
+	if strings.Contains(out, `lines="499`) {
+		t.Errorf("inverted range attribute leaked:\n%s", out)
+	}
+}
+
+func TestBundleRangeBypassesMaxSize(t *testing.T) {
+	// 3KB file, --max-size 1KB, but only a 2-line slice requested: must emit
+	// the slice instead of an oversize error.
+	root, rel := mkFixture(t, "big.txt", strings.Repeat("0123456789\n", 300))
+	var buf bytes.Buffer
+	if err := Bundle(&buf, Request{Root: root, Paths: []string{rel}, MaxSizeKB: 1, LineRange: "10-11"}); err != nil {
+		t.Fatalf("Bundle: %v", err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "exceeds --max-size") {
+		t.Errorf("ranged read should bypass --max-size:\n%s", out)
+	}
+	if !strings.Contains(out, "10 | 0123456789") {
+		t.Errorf("expected line 10 in output:\n%s", out)
+	}
+}
+
+func TestBundleCRLFTrimmed(t *testing.T) {
+	root, rel := mkFixture(t, "dos.txt", "one\r\ntwo\r\n")
+	var buf bytes.Buffer
+	if err := Bundle(&buf, Request{Root: root, Paths: []string{rel}}); err != nil {
+		t.Fatalf("Bundle: %v", err)
+	}
+	if strings.Contains(buf.String(), "\r") {
+		t.Errorf("carriage returns leaked into output:\n%q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "1 | one") {
+		t.Errorf("content missing:\n%s", buf.String())
+	}
+}
+
 func TestParseLineRange(t *testing.T) {
 	cases := []struct {
 		in        string
