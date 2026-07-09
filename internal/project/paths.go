@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-// DataDir returns the on-disk root for crocs/crocs. Honors $XDG_DATA_HOME,
+// DataDir returns the on-disk root for crocs. Honors $XDG_DATA_HOME,
 // falls back to ~/.local/share. Always returns an absolute path.
 func DataDir() (string, error) {
 	if d := os.Getenv("XDG_DATA_HOME"); d != "" {
@@ -42,8 +42,13 @@ func ProjectsRoot() (string, error) {
 }
 
 // ProjectPath returns where a project of the given name should live on disk.
-// Does not check existence.
+// Does not check existence. The name is validated so the result is always a
+// direct child of ProjectsRoot — a name like "../evil" must never produce a
+// path outside the managed tree (remove feeds this path to os.RemoveAll).
 func ProjectPath(name string) (string, error) {
+	if err := ValidateName(name); err != nil {
+		return "", err
+	}
 	root, err := ProjectsRoot()
 	if err != nil {
 		return "", err
@@ -51,8 +56,25 @@ func ProjectPath(name string) (string, error) {
 	return filepath.Join(root, name), nil
 }
 
+// ValidateName rejects project names that cannot safely be used as a single
+// path component under ProjectsRoot.
+func ValidateName(name string) error {
+	switch {
+	case name == "":
+		return fmt.Errorf("project name is empty")
+	case name == "." || name == "..":
+		return fmt.Errorf("invalid project name %q", name)
+	case strings.ContainsAny(name, `/\`):
+		return fmt.Errorf("invalid project name %q: must not contain path separators", name)
+	case strings.ContainsRune(name, 0):
+		return fmt.Errorf("invalid project name %q: must not contain NUL", name)
+	}
+	return nil
+}
+
 // NameFromURL infers a project name from a git URL. Returns the empty string
-// if no sensible name can be derived. Strips a trailing ".git".
+// if no sensible (and valid, per ValidateName) name can be derived. Strips a
+// trailing ".git".
 //
 // Examples:
 //
@@ -66,7 +88,54 @@ func NameFromURL(url string) string {
 	if i := strings.LastIndexAny(u, "/:"); i >= 0 {
 		u = u[i+1:]
 	}
+	if ValidateName(u) != nil {
+		return ""
+	}
 	return u
+}
+
+// ResolveInRoot resolves rel against root and guarantees the result stays
+// inside root, following symlinks. crocs commands take agent-supplied
+// relative paths (read-files, symbols -p); without this check a path like
+// "../../../../etc/passwd" — or an in-repo symlink pointing outside the
+// clone — becomes a read primitive over the whole filesystem.
+//
+// The returned path is the cleaned root+rel join (not symlink-resolved), so
+// callers keep emitting the path the user asked for. A nonexistent path is
+// not an error here; the caller's stat/read reports it in its usual shape.
+func ResolveInRoot(root, rel string) (string, error) {
+	if filepath.IsAbs(rel) {
+		return "", fmt.Errorf("%s: absolute paths are not allowed", rel)
+	}
+	abs := filepath.Join(root, rel) // Join cleans the result
+	if !isWithin(root, abs) {
+		return "", fmt.Errorf("%s: escapes the project root", rel)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve project root: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return abs, nil
+		}
+		return "", err
+	}
+	if resolvedRoot != resolved && !isWithin(resolvedRoot, resolved) {
+		return "", fmt.Errorf("%s: resolves outside the project root", rel)
+	}
+	return abs, nil
+}
+
+// isWithin reports whether path is root itself or a descendant of it. Both
+// arguments must already be absolute and cleaned.
+func isWithin(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 // EnsureDirs creates the data + projects directories with conservative perms.
