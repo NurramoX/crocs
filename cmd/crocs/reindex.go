@@ -9,10 +9,11 @@ import (
 )
 
 // reparseProject is the canonical "the snapshot just changed, refresh the
-// symbol index" helper. Called from fetch (initial population) and every
-// op that mutates the working tree: checkout, update, update-all,
-// unshallow. PLAN.md §5: "update/checkout/unshallow must reparse and
-// refresh the symbol index (snapshot changed)."
+// symbol index" helper — a shared helper, not a CLI command. Called from
+// fetch (initial population) and every op that changes (or may never have
+// indexed) the working tree: checkout, update, update-all, unshallow.
+// PLAN.md §5: "update/checkout/unshallow must reparse and refresh the
+// symbol index (snapshot changed)."
 //
 // Returns the number of symbols persisted so callers can include it in
 // their JSON response.

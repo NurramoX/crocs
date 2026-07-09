@@ -10,11 +10,13 @@ import (
 )
 
 type updateAllItem struct {
-	Name        string `json:"name"`
-	Ref         string `json:"ref,omitempty"`
-	OK          bool   `json:"ok"`
-	Error       string `json:"error,omitempty"`
-	SymbolCount int    `json:"symbol_count,omitempty"`
+	Name         string `json:"name"`
+	Ref          string `json:"ref,omitempty"`
+	OK           bool   `json:"ok"`
+	Changed      bool   `json:"changed"`
+	Error        string `json:"error,omitempty"`
+	SymbolCount  int    `json:"symbol_count"`
+	ReindexError string `json:"reindex_error,omitempty"`
 }
 
 type updateAllResponse struct {
@@ -41,25 +43,38 @@ var updateAllCmd = &cobra.Command{
 		resp := updateAllResponse{Updated: make([]updateAllItem, 0, len(all))}
 		for _, p := range all {
 			item := updateAllItem{Name: p.Name}
+			before, _ := vcs.HeadHash(p.Path)
 			if err := vcs.Pull(ctx, p.Path); err != nil {
 				item.Error = err.Error()
 				resp.Updated = append(resp.Updated, item)
 				continue
 			}
-			ref, _ := vcs.CurrentRef(p.Path)
+			ref, err := vcs.CurrentRef(p.Path)
+			if err != nil || ref == "" {
+				ref = p.DefaultRef
+			}
 			if err := db.UpdateProjectRef(ctx, p.Name, ref, time.Now().UTC()); err != nil {
 				item.Error = err.Error()
 				resp.Updated = append(resp.Updated, item)
 				continue
 			}
+			// The pull and registry update succeeded — that's what OK means.
+			// A reindex failure is reported separately so it doesn't read as
+			// "the git state didn't advance" when it did.
 			item.OK = true
 			item.Ref = ref
-			nSym, perr := reparseProject(ctx, db, p)
-			if perr != nil {
-				item.Error = "reindex: " + perr.Error()
-				item.OK = false
-			} else {
+			after, _ := vcs.HeadHash(p.Path)
+			item.Changed = before == "" || after == "" || before != after
+			if item.Changed || p.ParsedAt == nil {
+				nSym, perr := reparseProject(ctx, db, p)
+				if perr != nil {
+					item.ReindexError = perr.Error()
+				}
 				item.SymbolCount = nSym
+			} else {
+				if nSym, cerr := db.CountSymbols(ctx, p.Name); cerr == nil {
+					item.SymbolCount = nSym
+				}
 			}
 			resp.Updated = append(resp.Updated, item)
 		}

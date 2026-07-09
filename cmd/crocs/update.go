@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"time"
 
 	"crocs/internal/output"
@@ -11,9 +10,11 @@ import (
 )
 
 type updateResponse struct {
-	Name        string `json:"name"`
-	Ref         string `json:"ref"`
-	SymbolCount int    `json:"symbol_count"`
+	Name         string `json:"name"`
+	Ref          string `json:"ref"`
+	Changed      bool   `json:"changed"`
+	SymbolCount  int    `json:"symbol_count"`
+	ReindexError string `json:"reindex_error,omitempty"`
 }
 
 var updateCmd = &cobra.Command{
@@ -32,18 +33,36 @@ var updateCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		before, _ := vcs.HeadHash(p.Path)
 		if err := vcs.Pull(ctx, p.Path); err != nil {
 			return err
 		}
-		ref, _ := vcs.CurrentRef(p.Path)
+		ref, err := vcs.CurrentRef(p.Path)
+		if err != nil || ref == "" {
+			ref = p.DefaultRef
+		}
 		if err := db.UpdateProjectRef(ctx, p.Name, ref, time.Now().UTC()); err != nil {
 			return err
 		}
-		nSym, perr := reparseProject(ctx, db, p)
-		if perr != nil {
-			fmt.Fprintln(cmd.ErrOrStderr(), "crocs: symbol reindex failed:", perr)
+
+		after, _ := vcs.HeadHash(p.Path)
+		changed := before == "" || after == "" || before != after
+		resp := updateResponse{Name: p.Name, Ref: ref, Changed: changed}
+		if changed || p.ParsedAt == nil {
+			// Snapshot moved (or was never indexed) → rebuild the index.
+			nSym, perr := reparseProject(ctx, db, p)
+			if perr != nil {
+				resp.ReindexError = perr.Error()
+			}
+			resp.SymbolCount = nSym
+		} else {
+			// HEAD didn't move; the persisted index is still valid.
+			nSym, cerr := db.CountSymbols(ctx, p.Name)
+			if cerr == nil {
+				resp.SymbolCount = nSym
+			}
 		}
-		return output.Write(cmd.OutOrStdout(), "update", updateResponse{Name: p.Name, Ref: ref, SymbolCount: nSym})
+		return output.Write(cmd.OutOrStdout(), "update", resp)
 	},
 }
 
