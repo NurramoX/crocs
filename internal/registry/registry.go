@@ -25,7 +25,7 @@ const SchemaVersion = 2
 var ErrNotFound = errors.New("not found")
 
 // ErrIncompatibleSchema is returned when the registry on disk was written by
-// an older or newer crocs/crocs whose schema this binary does not understand.
+// an older or newer crocs whose schema this binary does not understand.
 var ErrIncompatibleSchema = errors.New("incompatible registry schema")
 
 // Project is a registry row in the projects table.
@@ -95,10 +95,6 @@ func openAt(ctx context.Context, path string) (*DB, error) {
 
 // Close releases the underlying database handle.
 func (db *DB) Close() error { return db.sql.Close() }
-
-// SQL exposes the underlying *sql.DB for advanced callers (e.g. the Phase 2
-// symbols pipeline). Most code should use the typed methods on DB.
-func (db *DB) SQL() *sql.DB { return db.sql }
 
 func (db *DB) migrate(ctx context.Context) error {
 	var version int

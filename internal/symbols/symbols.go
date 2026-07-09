@@ -105,9 +105,9 @@ func ExtractFile(abs string) (FileSymbols, error) {
 // per-language Tagger pool to amortize the (relatively expensive) NewTagger
 // query compile.
 //
-// Errors from individual files are logged-via-slog-and-continued — one bad
-// file shouldn't halve a fetch. Returns a non-nil error only on
-// catastrophic failure (e.g. walk error).
+// Errors on individual files (tagger construction, unreadable file) skip
+// that file and continue — one bad file shouldn't halt a fetch. Returns a
+// non-nil error only on catastrophic failure (e.g. walk error).
 func ExtractDir(ctx context.Context, root string) ([]FileSymbols, int64, error) {
 	type job struct {
 		abs, rel string
@@ -188,7 +188,6 @@ func ExtractDir(ctx context.Context, root string) ([]FileSymbols, int64, error) 
 		if err := ctx.Err(); err != nil {
 			return nil, 0, err
 		}
-		i, j := i, j
 		wg.Add(1)
 		sem <- struct{}{}
 		go func() {
@@ -260,11 +259,13 @@ var containerKinds = map[string]struct{}{
 }
 
 // goMethodReceiverRe matches the Go method-declaration prefix and captures
-// the receiver type name (with optional pointer-star). Anchored at start.
+// the receiver type name (with optional pointer-star and type parameters).
+// Anchored at start.
 //
-//	func (d *Dog) Walk()  → "Dog"
-//	func (a Animal) X()   → "Animal"
-var goMethodReceiverRe = regexp.MustCompile(`^\s*func\s*\(\s*\w+\s+\*?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)`)
+//	func (d *Dog) Walk()     → "Dog"
+//	func (a Animal) X()      → "Animal"
+//	func (d *Dog[T]) Fetch() → "Dog"
+var goMethodReceiverRe = regexp.MustCompile(`^\s*func\s*\(\s*\w+\s+\*?\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^\]]*\])?\s*\)`)
 
 // tagsToSymbols converts a slice of gotreesitter Tags into our Symbol type,
 // dropping non-definition tags and computing the Parent field where we can.

@@ -4,11 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strings"
 
 	"crocs/internal/output"
+	"crocs/internal/project"
 	"crocs/internal/registry"
 	"crocs/internal/symbols"
 
@@ -34,12 +34,12 @@ type symbolsResponse struct {
 }
 
 var (
-	symPath       string
-	symNamePat    string
-	symKinds      []string
-	symLang       string
-	symProjects   []string
-	symLimit      int
+	symPath     string
+	symNamePat  string
+	symKinds    []string
+	symLang     string
+	symProjects []string
+	symLimit    int
 )
 
 // defaultSymbolsLimit caps responses unless --limit overrides. Tuned to
@@ -68,7 +68,7 @@ func init() {
 	symbolsCmd.Flags().StringVarP(&symPath, "path", "p", "", "restrict to this one file (always parses fresh)")
 	symbolsCmd.Flags().StringVar(&symNamePat, "name", "", "match symbol names (substring; or glob with * / ?; or LIKE with % / _)")
 	symbolsCmd.Flags().StringSliceVar(&symKinds, "kind", nil, "filter by kind (comma-separated; e.g. function,method)")
-	symbolsCmd.Flags().StringVar(&symLang, "lang", "", "filter by language (e.g. go,python,typescript,tsx,java)")
+	symbolsCmd.Flags().StringVar(&symLang, "lang", "", "filter by language, comma-separated (of: "+strings.Join(symbols.SupportedLanguages(), ", ")+")")
 	symbolsCmd.Flags().StringSliceVar(&symProjects, "projects", nil, "cross-project: restrict to these projects (comma-separated)")
 	symbolsCmd.Flags().IntVar(&symLimit, "limit", defaultSymbolsLimit, "max rows returned; 0 = no cap")
 	rootCmd.AddCommand(symbolsCmd)
@@ -76,6 +76,9 @@ func init() {
 
 func runSymbols(cmd *cobra.Command, args []string) error {
 	ctx := cmdCtx(cmd)
+	if _, err := parseLangs(); err != nil {
+		return err
+	}
 	db, err := openRegistry(ctx)
 	if err != nil {
 		return err
@@ -108,15 +111,25 @@ func symbolsForFile(ctx context.Context, cmd *cobra.Command, db *registry.DB, na
 		return fmt.Errorf("language not supported for %s; supported: %s",
 			rel, strings.Join(symbols.SupportedLanguages(), ", "))
 	}
-	abs := filepath.Join(p.Path, rel)
+	abs, err := project.ResolveInRoot(p.Path, rel)
+	if err != nil {
+		return err
+	}
 	fs, err := symbols.ExtractFile(abs)
 	if err != nil {
 		return err
 	}
+	kinds := flatten(symKinds)
+	langs, _ := parseLangs() // already validated in runSymbols
 	recs := make([]symbolRecord, 0, len(fs.Symbols))
+	truncated := false
 	for _, s := range fs.Symbols {
-		if !matchesFilters(s.Name, s.Kind, s.Lang) {
+		if !matchesFilters(s.Name, s.Kind, s.Lang, kinds, langs) {
 			continue
+		}
+		if symLimit > 0 && len(recs) >= symLimit {
+			truncated = true
+			break
 		}
 		recs = append(recs, symbolRecord{
 			Path:    rel,
@@ -129,9 +142,10 @@ func symbolsForFile(ctx context.Context, cmd *cobra.Command, db *registry.DB, na
 		})
 	}
 	return output.Write(cmd.OutOrStdout(), "symbols", symbolsResponse{
-		Name:    p.Name,
-		Symbols: recs,
-		Count:   len(recs),
+		Name:      p.Name,
+		Symbols:   recs,
+		Count:     len(recs),
+		Truncated: truncated,
 	})
 }
 
@@ -186,13 +200,35 @@ func symbolsCrossProject(ctx context.Context, cmd *cobra.Command, db *registry.D
 }
 
 func buildQuery(projects []string) registry.SymbolQuery {
+	langs, _ := parseLangs() // already validated in runSymbols
 	return registry.SymbolQuery{
 		Projects:    projects,
 		NamePattern: registry.NormalizeGlob(symNamePat),
 		Kinds:       flatten(symKinds),
-		Lang:        symLang,
+		Langs:       langs,
 		Limit:       limitWithSlack(symLimit),
 	}
+}
+
+// parseLangs splits and validates the --lang flag. Comma-separated values
+// are accepted ("go,python"); unknown labels are an error rather than a
+// filter that silently matches nothing.
+func parseLangs() ([]string, error) {
+	if symLang == "" {
+		return nil, nil
+	}
+	supported := map[string]struct{}{}
+	for _, l := range symbols.SupportedLanguages() {
+		supported[l] = struct{}{}
+	}
+	langs := flatten([]string{symLang})
+	for _, l := range langs {
+		if _, ok := supported[l]; !ok {
+			return nil, fmt.Errorf("unsupported --lang %q; supported: %s",
+				l, strings.Join(symbols.SupportedLanguages(), ", "))
+		}
+	}
+	return langs, nil
 }
 
 // limitWithSlack returns a row cap one larger than the user's --limit so
@@ -250,15 +286,15 @@ func flatten(vals []string) []string {
 
 // matchesFilters applies the in-memory equivalents of the SQL filters,
 // used by the -p file path where we don't hit the db.
-func matchesFilters(name, kind, lang string) bool {
+func matchesFilters(name, kind, lang string, kinds, langs []string) bool {
 	if symNamePat != "" {
 		if !globMatch(name, symNamePat) {
 			return false
 		}
 	}
-	if len(symKinds) > 0 {
+	if len(kinds) > 0 {
 		ok := false
-		for _, k := range flatten(symKinds) {
+		for _, k := range kinds {
 			if k == kind {
 				ok = true
 				break
@@ -268,14 +304,25 @@ func matchesFilters(name, kind, lang string) bool {
 			return false
 		}
 	}
-	if symLang != "" && symLang != lang {
-		return false
+	if len(langs) > 0 {
+		ok := false
+		for _, l := range langs {
+			if l == lang {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return false
+		}
 	}
 	return true
 }
 
 // globMatch is the in-process counterpart of registry.NormalizeGlob — same
-// behavior, but evaluated against a Go string rather than a SQL column.
+// behavior as SQLite LIKE, including its ASCII case-insensitivity, so
+// `--name repo` matches UserRepository in -p mode exactly as it does in the
+// indexed modes.
 func globMatch(s, pat string) bool {
 	switch {
 	case strings.ContainsAny(pat, "%_"):
@@ -283,22 +330,24 @@ func globMatch(s, pat string) bool {
 	case strings.ContainsAny(pat, "*?"):
 		return likeMatch(s, strings.NewReplacer("*", "%", "?", "_").Replace(pat))
 	default:
-		return strings.Contains(s, pat)
+		return strings.Contains(asciiLower(s), asciiLower(pat))
 	}
 }
 
-// likeMatch implements SQL LIKE wildcards against a string. % matches any
-// run including empty; _ matches exactly one rune.
+// likeMatch implements SQL LIKE wildcards against a string: % matches any
+// run including empty, _ matches exactly one rune, and letter comparison is
+// ASCII case-insensitive (SQLite's default LIKE semantics).
 func likeMatch(s, pat string) bool {
+	rs, rp := []rune(s), []rune(pat)
 	// Standard 2-pointer LIKE matcher.
 	si, pi := 0, 0
 	starS, starP := -1, -1
-	for si < len(s) {
+	for si < len(rs) {
 		switch {
-		case pi < len(pat) && (pat[pi] == '_' || pat[pi] == s[si]):
+		case pi < len(rp) && (rp[pi] == '_' || likeRuneEq(rp[pi], rs[si])):
 			si++
 			pi++
-		case pi < len(pat) && pat[pi] == '%':
+		case pi < len(rp) && rp[pi] == '%':
 			starP = pi
 			starS = si
 			pi++
@@ -310,8 +359,27 @@ func likeMatch(s, pat string) bool {
 			return false
 		}
 	}
-	for pi < len(pat) && pat[pi] == '%' {
+	for pi < len(rp) && rp[pi] == '%' {
 		pi++
 	}
-	return pi == len(pat)
+	return pi == len(rp)
+}
+
+func likeRuneEq(a, b rune) bool {
+	if 'A' <= a && a <= 'Z' {
+		a += 'a' - 'A'
+	}
+	if 'A' <= b && b <= 'Z' {
+		b += 'a' - 'A'
+	}
+	return a == b
+}
+
+func asciiLower(s string) string {
+	return strings.Map(func(r rune) rune {
+		if 'A' <= r && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return r
+	}, s)
 }

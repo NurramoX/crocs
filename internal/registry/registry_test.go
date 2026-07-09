@@ -119,8 +119,9 @@ func TestForeignSchemaRefused(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "foreign.db")
 
-	// Open via the registry once with a stub table layout that mimics the old
-	// Python crocs schema; we never call migrate().
+	// Create a real v2 registry, then reset user_version to 0 below — from
+	// migrate()'s perspective that is indistinguishable from a foreign
+	// (pre-v2) db that has our table names but never set a version.
 	db, err := OpenAt(ctx, dbPath)
 	if err != nil {
 		t.Fatalf("open fresh: %v", err)

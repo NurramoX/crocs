@@ -3,7 +3,6 @@ package registry
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -90,12 +89,11 @@ func (db *DB) ReplaceSymbols(ctx context.Context, project string, rows []SymbolI
 // this dimension"; an empty Projects with NamePattern set is the
 // cross-project mode from PLAN.md §2 #8.
 type SymbolQuery struct {
-	Projects     []string // restrict to these projects (cross-project subset)
-	Path         string   // restrict to this exact relative path
-	NamePattern  string   // SQL LIKE pattern (callers escape % and _ if literal); see NormalizeGlob
-	Kinds        []string // restrict to these kinds
-	Lang         string   // restrict to one language
-	Limit        int      // max rows returned; 0 = no cap
+	Projects    []string // restrict to these projects (cross-project subset)
+	NamePattern string   // SQL LIKE pattern (callers escape % and _ if literal); see NormalizeGlob
+	Kinds       []string // restrict to these kinds
+	Langs       []string // restrict to these languages
+	Limit       int      // max rows returned; 0 = no cap
 }
 
 // NormalizeGlob converts a user-facing pattern to a SQL LIKE expression.
@@ -136,10 +134,6 @@ func (db *DB) FindSymbols(ctx context.Context, q SymbolQuery) ([]SymbolRow, erro
 			args = append(args, p)
 		}
 	}
-	if q.Path != "" {
-		where = append(where, "path = ?")
-		args = append(args, q.Path)
-	}
 	if q.NamePattern != "" {
 		where = append(where, "name LIKE ?")
 		args = append(args, q.NamePattern)
@@ -151,9 +145,12 @@ func (db *DB) FindSymbols(ctx context.Context, q SymbolQuery) ([]SymbolRow, erro
 			args = append(args, k)
 		}
 	}
-	if q.Lang != "" {
-		where = append(where, "lang = ?")
-		args = append(args, q.Lang)
+	if len(q.Langs) > 0 {
+		ph := placeholders(len(q.Langs))
+		where = append(where, "lang IN ("+ph+")")
+		for _, l := range q.Langs {
+			args = append(args, l)
+		}
 	}
 	sqlStr := `SELECT project, path, name, kind, line, end_line, parent, lang FROM symbols`
 	if len(where) > 0 {
@@ -174,9 +171,9 @@ func (db *DB) FindSymbols(ctx context.Context, q SymbolQuery) ([]SymbolRow, erro
 	var out []SymbolRow
 	for rows.Next() {
 		var (
-			r        SymbolRow
-			endLine  sql.NullInt64
-			parent   sql.NullString
+			r       SymbolRow
+			endLine sql.NullInt64
+			parent  sql.NullString
 		)
 		if err := rows.Scan(&r.Project, &r.Path, &r.Name, &r.Kind, &r.Line, &endLine, &parent, &r.Lang); err != nil {
 			return nil, err
@@ -192,14 +189,12 @@ func (db *DB) FindSymbols(ctx context.Context, q SymbolQuery) ([]SymbolRow, erro
 	return out, rows.Err()
 }
 
-// CountSymbols returns the row count matching the query. Mainly for fetch's
-// response (so it can report "indexed N symbols").
+// CountSymbols returns the number of indexed symbols for a project. Used by
+// commands that leave an existing index untouched (update with an unmoved
+// HEAD, unshallow) but still report symbol_count.
 func (db *DB) CountSymbols(ctx context.Context, project string) (int, error) {
 	var n int
 	err := db.sql.QueryRowContext(ctx, `SELECT count(*) FROM symbols WHERE project = ?`, project).Scan(&n)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, nil
-	}
 	return n, err
 }
 
