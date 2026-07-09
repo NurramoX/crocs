@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+
 	"crocs/internal/output"
 	"crocs/internal/vcs"
 
@@ -8,9 +10,14 @@ import (
 )
 
 type branchesResponse struct {
-	Name     string       `json:"name"`
-	Branches []vcs.Branch `json:"branches"`
+	Name      string       `json:"name"`
+	Shallow   bool         `json:"shallow"`
+	Hint      string       `json:"hint,omitempty"`
+	Branches  []vcs.Branch `json:"branches"`
+	Truncated bool         `json:"truncated"`
 }
+
+var branchesLimit int
 
 var branchesCmd = &cobra.Command{
 	Use:   "branches <name>",
@@ -35,13 +42,26 @@ var branchesCmd = &cobra.Command{
 		if branches == nil {
 			branches = []vcs.Branch{}
 		}
+		truncated := false
+		if branchesLimit > 0 && len(branches) > branchesLimit {
+			branches = branches[:branchesLimit]
+			truncated = true
+		}
+		hint := ""
+		if p.Shallow {
+			hint = fmt.Sprintf("shallow single-branch clone: remote branches were not fetched; run `crocs unshallow %s` to see them all", p.Name)
+		}
 		return output.Write(cmd.OutOrStdout(), "branches", branchesResponse{
-			Name:     p.Name,
-			Branches: branches,
+			Name:      p.Name,
+			Shallow:   p.Shallow,
+			Hint:      hint,
+			Branches:  branches,
+			Truncated: truncated,
 		})
 	},
 }
 
 func init() {
+	branchesCmd.Flags().IntVarP(&branchesLimit, "limit", "n", 0, "max branches to return (0 = no cap)")
 	rootCmd.AddCommand(branchesCmd)
 }

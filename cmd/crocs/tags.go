@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+
 	"crocs/internal/output"
 	"crocs/internal/vcs"
 
@@ -8,9 +10,14 @@ import (
 )
 
 type tagsResponse struct {
-	Name string    `json:"name"`
-	Tags []vcs.Tag `json:"tags"`
+	Name      string    `json:"name"`
+	Shallow   bool      `json:"shallow"`
+	Hint      string    `json:"hint,omitempty"`
+	Tags      []vcs.Tag `json:"tags"`
+	Truncated bool      `json:"truncated"`
 }
+
+var tagsLimit int
 
 var tagsCmd = &cobra.Command{
 	Use:   "tags <name>",
@@ -35,13 +42,28 @@ var tagsCmd = &cobra.Command{
 		if tags == nil {
 			tags = []vcs.Tag{}
 		}
+		truncated := false
+		if tagsLimit > 0 && len(tags) > tagsLimit {
+			tags = tags[:tagsLimit]
+			truncated = true
+		}
+		hint := ""
+		if p.Shallow {
+			// The single most misleading output in the old CLI: a confident
+			// empty tag list on every fresh clone. Say why it's empty.
+			hint = fmt.Sprintf("shallow clone: tags were not fetched; run `crocs unshallow %s` to get them", p.Name)
+		}
 		return output.Write(cmd.OutOrStdout(), "tags", tagsResponse{
-			Name: p.Name,
-			Tags: tags,
+			Name:      p.Name,
+			Shallow:   p.Shallow,
+			Hint:      hint,
+			Tags:      tags,
+			Truncated: truncated,
 		})
 	},
 }
 
 func init() {
+	tagsCmd.Flags().IntVarP(&tagsLimit, "limit", "n", 0, "max tags to return (0 = no cap)")
 	rootCmd.AddCommand(tagsCmd)
 }

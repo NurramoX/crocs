@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+
 	"crocs/internal/output"
 	"crocs/internal/vcs"
 
@@ -9,6 +11,8 @@ import (
 
 type logResponse struct {
 	Name    string         `json:"name"`
+	Shallow bool           `json:"shallow"`
+	Hint    string         `json:"hint,omitempty"`
 	Commits []vcs.LogEntry `json:"commits"`
 }
 
@@ -37,8 +41,14 @@ var logCmd = &cobra.Command{
 		if commits == nil {
 			commits = []vcs.LogEntry{}
 		}
+		hint := ""
+		if p.Shallow {
+			hint = fmt.Sprintf("shallow clone: history is truncated at fetch depth; run `crocs unshallow %s` for full history", p.Name)
+		}
 		return output.Write(cmd.OutOrStdout(), "log", logResponse{
 			Name:    p.Name,
+			Shallow: p.Shallow,
+			Hint:    hint,
 			Commits: commits,
 		})
 	},

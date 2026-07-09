@@ -1,8 +1,9 @@
 // Package vcs wraps git operations. Clones default to the git CLI with
 // blobless+shallow filtering (PLAN.md §1 "The git decision, expanded");
 // go-git is the in-process fallback and the engine for read-only inspection
-// (branches, tags, log, diff). The clone path is the single largest perf
-// dial in the tool — Phase 0 benched git CLI at ~10× faster on large repos.
+// (branches, tags, and the no-git log path). diff and unshallow require the
+// CLI. The clone path is the single largest perf dial in the tool — Phase 0
+// benched git CLI at ~10× faster on large repos.
 package vcs
 
 import (
@@ -14,6 +15,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"time"
 
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -103,16 +105,35 @@ func cloneCLI(ctx context.Context, opts CloneOptions) (bool, error) {
 }
 
 func cloneGoGit(ctx context.Context, opts CloneOptions) error {
-	gco := &gogit.CloneOptions{URL: opts.URL}
-	if opts.Progress != nil {
-		gco.Progress = opts.Progress
+	clone := func(ref plumbing.ReferenceName) error {
+		gco := &gogit.CloneOptions{URL: opts.URL}
+		if opts.Progress != nil {
+			gco.Progress = opts.Progress
+		}
+		if ref != "" {
+			gco.ReferenceName = ref
+			gco.SingleBranch = true
+		}
+		_, err := gogit.PlainCloneContext(ctx, opts.Dest, false, gco)
+		return err
 	}
-	if opts.Ref != "" {
-		gco.ReferenceName = plumbing.NewBranchReferenceName(opts.Ref)
-		gco.SingleBranch = true
+	if opts.Ref == "" {
+		if err := clone(""); err != nil {
+			return fmt.Errorf("go-git clone: %w", err)
+		}
+		return nil
 	}
-	if _, err := gogit.PlainCloneContext(ctx, opts.Dest, false, gco); err != nil {
-		return fmt.Errorf("go-git clone: %w", err)
+	// --ref promises "branch or tag"; go-git needs a fully-qualified ref
+	// name, so try branch first, then tag. A failed attempt may leave a
+	// partial dest behind — clear it before retrying.
+	branchErr := clone(plumbing.NewBranchReferenceName(opts.Ref))
+	if branchErr == nil {
+		return nil
+	}
+	_ = os.RemoveAll(opts.Dest)
+	if err := clone(plumbing.NewTagReferenceName(opts.Ref)); err != nil {
+		_ = os.RemoveAll(opts.Dest)
+		return fmt.Errorf("go-git clone: ref %q matched neither a branch (%v) nor a tag: %w", opts.Ref, branchErr, err)
 	}
 	return nil
 }
@@ -137,7 +158,13 @@ func CurrentRef(repoDir string) (string, error) {
 		hash := head.Hash()
 		var match string
 		_ = tags.ForEach(func(ref *plumbing.Reference) error {
-			if ref.Hash() == hash {
+			// Annotated tags: ref.Hash() is the tag *object*, not the commit
+			// it points to — peel it or annotated tags never match HEAD.
+			h := ref.Hash()
+			if tagObj, terr := repo.TagObject(h); terr == nil {
+				h = tagObj.Target
+			}
+			if h == hash {
 				match = ref.Name().Short()
 				return io.EOF
 			}
@@ -148,6 +175,20 @@ func CurrentRef(repoDir string) (string, error) {
 		}
 	}
 	return head.Hash().String()[:12], nil
+}
+
+// HeadHash returns the full commit hash HEAD points at. Used for cheap
+// did-anything-change checks around pull.
+func HeadHash(repoDir string) (string, error) {
+	repo, err := gogit.PlainOpen(repoDir)
+	if err != nil {
+		return "", fmt.Errorf("open repo: %w", err)
+	}
+	head, err := repo.Head()
+	if err != nil {
+		return "", fmt.Errorf("read HEAD: %w", err)
+	}
+	return head.Hash().String(), nil
 }
 
 // Branch is one branch reference, local or remote.
@@ -208,7 +249,14 @@ func Tags(repoDir string) ([]Tag, error) {
 	}
 	var out []Tag
 	err = tags.ForEach(func(ref *plumbing.Reference) error {
-		out = append(out, Tag{Name: ref.Name().Short(), Hash: ref.Hash().String()})
+		// Peel annotated tags to the commit they point at, so Hash means the
+		// same thing for lightweight and annotated tags (and matches what
+		// branches reports).
+		h := ref.Hash()
+		if tagObj, terr := repo.TagObject(h); terr == nil {
+			h = tagObj.Target
+		}
+		out = append(out, Tag{Name: ref.Name().Short(), Hash: h.String()})
 		return nil
 	})
 	if err != nil {
@@ -271,11 +319,23 @@ func logCLI(repoDir string, limit int) ([]LogEntry, error) {
 			Hash:    parts[0],
 			Author:  parts[1],
 			Email:   parts[2],
-			Date:    parts[3],
+			Date:    normalizeDate(parts[3]),
 			Subject: parts[4],
 		})
 	}
 	return entries, nil
+}
+
+// normalizeDate converts git's %aI output (author-local offset, e.g.
+// "2024-05-01T12:00:00+02:00") to the UTC RFC3339 shape LogEntry documents.
+// Both log engines emit the same date format this way. Unparseable input
+// passes through untouched rather than being dropped.
+func normalizeDate(s string) string {
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return s
+	}
+	return t.UTC().Format(time.RFC3339)
 }
 
 func logGoGit(repoDir string, limit int) ([]LogEntry, error) {
@@ -296,7 +356,7 @@ func logGoGit(repoDir string, limit int) ([]LogEntry, error) {
 			Hash:    c.Hash.String(),
 			Author:  c.Author.Name,
 			Email:   c.Author.Email,
-			Date:    c.Author.When.UTC().Format("2006-01-02T15:04:05Z"),
+			Date:    c.Author.When.UTC().Format(time.RFC3339),
 			Subject: firstLine(c.Message),
 		})
 		count++
@@ -311,39 +371,59 @@ func logGoGit(repoDir string, limit int) ([]LogEntry, error) {
 	return out, nil
 }
 
-// Diff returns a unified diff between two refs in repoDir. fromRef may be
-// empty, in which case the diff is just `git diff <toRef>` (working tree
-// against the ref).
-func Diff(repoDir, fromRef, toRef string) (string, error) {
+// DiffOptions narrows a Diff call.
+type DiffOptions struct {
+	From  string   // from-ref; empty = working tree base (see below)
+	To    string   // to-ref; empty = working tree
+	Stat  bool     // --stat summary instead of a full patch
+	Paths []string // limit the diff to these paths
+}
+
+// Diff returns a unified diff in repoDir. Ref semantics follow git:
+// From+To = From..To, From alone = From against the working tree, To alone
+// = To against the working tree, neither = unstaged changes.
+func Diff(repoDir string, opts DiffOptions) (string, error) {
 	if !HasGit() {
 		return "", errors.New("vcs.Diff: requires git CLI on $PATH")
 	}
 	args := []string{"-C", repoDir, "diff"}
-	if fromRef != "" && toRef != "" {
-		args = append(args, fromRef+".."+toRef)
-	} else if toRef != "" {
-		args = append(args, toRef)
+	if opts.Stat {
+		args = append(args, "--stat")
+	}
+	switch {
+	case opts.From != "" && opts.To != "":
+		args = append(args, opts.From+".."+opts.To)
+	case opts.From != "":
+		args = append(args, opts.From)
+	case opts.To != "":
+		args = append(args, opts.To)
+	}
+	if len(opts.Paths) > 0 {
+		args = append(args, "--")
+		args = append(args, opts.Paths...)
 	}
 	cmd := exec.Command("git", args...)
 	out, err := cmd.Output()
 	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return "", fmt.Errorf("git diff: %w: %s", err, strings.TrimSpace(string(ee.Stderr)))
+		}
 		return "", fmt.Errorf("git diff: %w", err)
 	}
 	return string(out), nil
 }
 
-// Checkout switches repoDir to the given ref. Uses the CLI when present
-// (handles fetch+checkout for refs not yet present locally); falls back to
-// go-git Worktree.Checkout for the common branch-only case.
+// Checkout switches repoDir to the given ref. The ref must already exist
+// locally — no fetch is attempted (on the default shallow single-branch
+// clone that means most refs need `unshallow` first). Falls back to go-git
+// Worktree.Checkout without a git CLI, trying branch, tag, then raw hash.
 func Checkout(ctx context.Context, repoDir, ref string) error {
 	if ref == "" {
 		return errors.New("vcs.Checkout: ref is required")
 	}
 	if HasGit() {
-		cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "checkout", ref)
-		cmd.Stdout = io.Discard
-		cmd.Stderr = io.Discard
-		return cmd.Run()
+		return runGit(ctx, repoDir, "checkout", ref)
 	}
 	repo, err := gogit.PlainOpen(repoDir)
 	if err != nil {
@@ -353,18 +433,27 @@ func Checkout(ctx context.Context, repoDir, ref string) error {
 	if err != nil {
 		return err
 	}
-	return wt.Checkout(&gogit.CheckoutOptions{
+	branchErr := wt.Checkout(&gogit.CheckoutOptions{
 		Branch: plumbing.NewBranchReferenceName(ref),
 	})
+	if branchErr == nil {
+		return nil
+	}
+	if err := wt.Checkout(&gogit.CheckoutOptions{
+		Branch: plumbing.NewTagReferenceName(ref),
+	}); err == nil {
+		return nil
+	}
+	if plumbing.IsHash(ref) {
+		return wt.Checkout(&gogit.CheckoutOptions{Hash: plumbing.NewHash(ref)})
+	}
+	return branchErr
 }
 
 // Pull fetches and fast-forwards repoDir.
 func Pull(ctx context.Context, repoDir string) error {
 	if HasGit() {
-		cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "pull", "--ff-only")
-		cmd.Stdout = io.Discard
-		cmd.Stderr = io.Discard
-		return cmd.Run()
+		return runGit(ctx, repoDir, "pull", "--ff-only")
 	}
 	repo, err := gogit.PlainOpen(repoDir)
 	if err != nil {
@@ -419,6 +508,9 @@ func RemoteURL(repoDir string) (string, error) {
 func runGit(ctx context.Context, repoDir string, args ...string) error {
 	full := append([]string{"-C", repoDir}, args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
+	// Pin the message locale: callers (notably Unshallow) match on English
+	// substrings of git's output.
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
