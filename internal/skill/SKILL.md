@@ -1,20 +1,15 @@
 ---
 name: crocs
-description: "Locate which files handle a topic in a git repository, without reading them into the main context, using the crocs CLI. Trigger when the user asks where a feature or subsystem lives in a repo crocs tracks, asks to explore or orient in an unfamiliar repository, or wants to fetch/track an external repo for exploration. Also reach for this when another task needs a locate-then-read pass over a codebase outside the working directory."
+description: "Locate which files handle a topic in a git repo via the crocs CLI, without reading them into the main context. Use when the user asks where a feature or subsystem lives, wants to orient in an unfamiliar repo, or wants to fetch an external repo — or when another task needs a locate-then-read pass over a codebase outside the working directory."
 ---
 
 # crocs
 
 Answer "where does X live, and what's its logic?" over a large repo **without
-reading dozens of files into your own context**. The pattern: you (the main
-agent) decide *what* to look for and delegate the *looking* to subagents whose
-context is disposable. They grep, read, and judge; they return a short ranked
-file list with one-line rationales. You read only the handful that matter.
-
-This exists because the expensive part of code exploration is the *reading* —
-skimming 80 candidate files to find the 8 that matter. Done in your context,
-that's 80 files of tokens you carry for the rest of the session. Done in a
-subagent, it's discarded the moment the subagent returns its list.
+reading dozens of files into your own context**. You (the main agent) decide
+*what* to look for; subagents do the *looking* — skimming the 80 candidate
+files to find the 8 that matter — and their context is discarded the moment
+they return their short ranked list. You read only the survivors.
 
 **The doctrine: load the map at low resolution, zoom on demand.** The CLI is a
 resolution ladder:
@@ -43,8 +38,7 @@ resolution (a repo-wide symbol dump, a blanket grep you read yourself).
 - One narrow grep whose result you'll act on immediately → `crocs grep`.
 
 If you can answer the question by reading ≤3 files you already identified, skip
-the subagent and just read them. The subagent earns its cost only when it
-saves *you* from reading a large candidate set.
+the subagent and just read them.
 
 ## The crocs CLI surface
 
@@ -53,7 +47,7 @@ All commands take the tracked project NAME as the first argument.
 ```
 crocs fetch <git-url>              # clone + track a repo (do this once)
 crocs list                         # list tracked projects
-crocs summary <name>               # concise overview + semantic metadata + project shape
+crocs summary <name>               # overview + semantic metadata + shape (README, manifest, key config)
 crocs tree <name>                  # one file path per line
 crocs map <name>                   # directory heatmap (file counts, non-recursive) — find the dense dirs
 crocs detect <name> [-i/-e path]   # language histogram, scopable to a subtree
@@ -81,13 +75,6 @@ crocs symbols [filters]            # cross-project index query (omit the name)
 Every JSON command also takes a global `--compact` (unindented JSON — cheaper
 to read for large grep/symbols output).
 
-`crocs grep` is the candidate-finder. `crocs read-files` is the reader (use
-`--lines` to read a signature region instead of a whole large file). `crocs
-symbols -p <file>` gives a file's structure so a subagent can decide whether a
-file is worth fully reading. `crocs summary` already surfaces the project's
-shape (README, dependency manifest, key config) — read it first on an
-unfamiliar repo.
-
 ## The workflow
 
 ### 1. Orient (you, once per repo, cheap)
@@ -102,9 +89,9 @@ with sensible path scopes (e.g. "search under `src/` and `pkg/`, not `docs/`").
 
 ### 2. Expand the topic into search terms (you)
 
-You're an LLM — do the synonym expansion yourself; crocs has no semantic search.
-Turn the user's topic into a regex alternation of the vocabulary that would
-actually appear in the relevant files. Start with **high-precision** terms
+crocs has no semantic search — the synonym expansion is your job. Turn the
+user's topic into a regex alternation of the vocabulary that would actually
+appear in the relevant files. Start with **high-precision** terms
 (only the topic uses them) before adding broad ones:
 
 - "auth" → high-precision: `authenticat|authoriz|oauth|jwt|csrf|credential|login|logout|guest_token`. Broad (add if the first pass missed obvious files): `|session|permission|role|token`. The broad terms over-fire in dense codebases — "session" matches SQLAlchemy DB sessions, "role" matches chart roles, "token" matches lexer tokens — and burn the `--max-results` cap before the actual auth files are reached.
@@ -143,7 +130,7 @@ out actually appears in the `crocs map` output.
 
 ### 4. Delegate search-and-filter to subagent(s)
 
-Spawn a subagent (Claude Code Task tool) per scope. Brief it tightly, and brief
+Spawn a subagent per scope. Brief it tightly, and brief
 the *concept*, not guessed structure: describe what the code you want *does*
 ("code that maps triage roles to label strings") and add a question the
 subagent can orient by ("where would a maintainer of X have to edit?"). Don't
@@ -226,13 +213,10 @@ anchors the subagent on a dead end. The only paths in the brief should be the
 >    The login flow is central.
 >    ```
 
-The `<files>...</files>` wrapper is what makes the output contract enforceable
-rather than a polite request. Subagents have a strong reflex to summarize their
-reasoning before answering and prompt-level "don't narrate" instructions only
-partially suppress it. The wrapper converts the contract into a verifiable
-shape: the main agent extracts only what's between the markers and ignores
-everything else. When you brief the subagent, include the good/bad examples
-verbatim — they are load-bearing.
+Brief the subagent with the output contract and the good/bad examples
+verbatim — they are load-bearing. Subagents reflexively narrate their
+reasoning before answering; the wrapper is what turns the contract from a
+polite request into a shape you can verify.
 
 **Main-agent extraction step (you, after the subagent returns):** read only the
 lines between `<files>` and `</files>`. Discard everything outside, including
@@ -257,8 +241,7 @@ crocs read-files <name> <core1> <core2> <core3>
 
 Read `core` files first — they usually answer the question. Pull in `related`
 files only where the core files reference them; touch `speculative` files only
-if the picture is still incomplete after that. You spent ~3 files of context,
-not 80, and you have an accurate relevant set.
+if the picture is still incomplete after that.
 
 ## Version pinning & history (occasional)
 
@@ -275,8 +258,7 @@ crocs diff <name> --from v2.2.0 --to v2.3.0 --stat   # what changed between rele
 ```
 
 `crocs checkout` (not raw git) is the right tool here because it also
-reindexes symbols for the new snapshot. Skip this whole section for ordinary
-"how does X work today" research.
+reindexes symbols for the new snapshot.
 
 ## Sharding large candidate sets
 
@@ -292,18 +274,7 @@ subagent C:  crocs grep <name> "<regex>" -i pkg/
 
 Each subagent filters its own slice and returns a short list; you merge and
 dedupe the lists (they're short — merging is cheap and stays in your context).
-
-**When to shard** (any one is enough):
-- The scope crosses stacks (e.g. Python backend + TS frontend). A single grep
-  over both is biased toward whichever tree ripgrep walks first; a 200-result
-  cap will be eaten before reaching the second tree, so the second stack
-  becomes invisible.
-- A single subagent would have to read more than ~20 files.
-- A previous single-subagent run returned the empty wrapper (its `truncated`
-  fired).
-
-Two short sharded subagent runs cost less than one biased run you have to
-re-do. When in doubt, shard.
+The triggers that make sharding mandatory live in workflow step 3.
 
 ## Quick reference
 
