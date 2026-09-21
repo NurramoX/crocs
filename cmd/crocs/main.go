@@ -1,5 +1,5 @@
 // Command crocs is a fast-primitives CLI for AI-driven code exploration. See
-// PLAN.md for the design and skills/crocs/SKILL.md for the consumer pattern.
+// skills/crocs/SKILL.md for the consumer pattern.
 package main
 
 import (

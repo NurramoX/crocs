@@ -14,7 +14,7 @@ loop cheap; the loop itself lives in the included skill.
 
 ```sh
 go install github.com/<owner>/crocs/cmd/crocs@latest
-crocs install-skill                # writes SKILL.md to ~/.claude/skills/crocs/
+crocs install-skill                # writes the skill to ~/.claude/skills/crocs/
 ```
 
 From source:
@@ -91,7 +91,8 @@ strings:
 
 ## The agent + subagent loop
 
-The point of crocs is the loop documented in `skills/crocs/SKILL.md`. The
+The point of crocs is the loop documented in `skills/crocs/SKILL.md` (the
+subagent brief it sends is `skills/crocs/BRIEF.md`). The
 main agent runs `summary` and `map` directly (cheap orientation), then
 spawns subagents to grep the repo, judge candidate files, and return a
 short list wrapped in `<files>…</files>` markers. The main agent reads
@@ -155,8 +156,7 @@ internal/
   detect/       extension → language histogram
   output/       JSON envelope writer
   project/      XDG paths + name normalization
-  skill/        embedded SKILL.md
-skills/crocs/   canonical SKILL.md (also embedded)
+skills/crocs/   the agent skill (SKILL.md + BRIEF.md), embedded into the binary
 ```
 
 ## License
