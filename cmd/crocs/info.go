@@ -7,12 +7,13 @@ import (
 )
 
 type infoResponse struct {
-	Project projectJSON `json:"project"`
+	Project  projectJSON  `json:"project"`
+	Checkout checkoutJSON `json:"checkout"`
 }
 
 var infoCmd = &cobra.Command{
 	Use:   "info <name>",
-	Short: "Show details for a tracked project",
+	Short: "Show a tracked repo, all its checkouts, and the one addressed",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmdCtx(cmd)
@@ -26,7 +27,14 @@ var infoCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		return output.Write(cmd.OutOrStdout(), "info", infoResponse{Project: projectToJSON(p)})
+		all, err := repoCheckouts(ctx, db, p.Repo)
+		if err != nil {
+			return err
+		}
+		return output.Write(cmd.OutOrStdout(), "info", infoResponse{
+			Project:  groupProjects(all)[0],
+			Checkout: checkoutToJSON(p),
+		})
 	},
 }
 

@@ -1,10 +1,7 @@
 package main
 
 import (
-	"time"
-
 	"crocs/internal/output"
-	"crocs/internal/vcs"
 
 	"github.com/spf13/cobra"
 )
@@ -12,6 +9,9 @@ import (
 type updateAllItem struct {
 	Name         string `json:"name"`
 	Ref          string `json:"ref,omitempty"`
+	Kind         string `json:"kind,omitempty"`
+	PrevCommit   string `json:"previous_commit,omitempty"`
+	Commit       string `json:"commit,omitempty"`
 	OK           bool   `json:"ok"`
 	Changed      bool   `json:"changed"`
 	Error        string `json:"error,omitempty"`
@@ -25,7 +25,7 @@ type updateAllResponse struct {
 
 var updateAllCmd = &cobra.Command{
 	Use:   "update-all",
-	Short: "Pull latest changes for every tracked project",
+	Short: "Bring every checkout of every tracked repo up to date",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmdCtx(cmd)
@@ -43,31 +43,24 @@ var updateAllCmd = &cobra.Command{
 		resp := updateAllResponse{Updated: make([]updateAllItem, 0, len(all))}
 		for _, p := range all {
 			item := updateAllItem{Name: p.Name}
-			before, _ := vcs.HeadHash(p.Path)
-			if err := vcs.Pull(ctx, p.Path); err != nil {
+			res, err := advanceCheckout(ctx, db, p)
+			if err != nil {
 				item.Error = err.Error()
 				resp.Updated = append(resp.Updated, item)
 				continue
 			}
-			ref, err := vcs.CurrentRef(p.Path)
-			if err != nil || ref == "" {
-				ref = p.DefaultRef
-			}
-			if err := db.UpdateProjectRef(ctx, p.Name, ref, time.Now().UTC()); err != nil {
-				item.Error = err.Error()
-				resp.Updated = append(resp.Updated, item)
-				continue
-			}
-			// The pull and registry update succeeded — that's what OK means.
-			// A reindex failure is reported separately so it doesn't read as
-			// "the git state didn't advance" when it did.
+			// The git advance and registry update succeeded — that's what OK
+			// means. A reindex failure is reported separately so it doesn't
+			// read as "the git state didn't advance" when it did.
 			item.OK = true
-			item.Ref = ref
-			changed, nSym, perr := syncAfterPull(ctx, db, p, before)
-			item.Changed = changed
-			item.SymbolCount = nSym
-			if perr != nil {
-				item.ReindexError = perr.Error()
+			item.Ref = res.Ref
+			item.Kind = res.Kind
+			item.PrevCommit = res.Before
+			item.Commit = res.Commit
+			item.Changed = res.Changed
+			item.SymbolCount = res.SymbolCount
+			if res.ReindexError != nil {
+				item.ReindexError = res.ReindexError.Error()
 			}
 			resp.Updated = append(resp.Updated, item)
 		}

@@ -43,10 +43,12 @@ func ProjectsRoot() (string, error) {
 	return filepath.Join(d, "projects"), nil
 }
 
-// ProjectPath returns where a project of the given name should live on disk.
-// Does not check existence. The name is validated so the result is always a
-// direct child of ProjectsRoot — a name like "../evil" must never produce a
-// path outside the managed tree (remove feeds this path to os.RemoveAll).
+// ProjectPath returns where a repo of the given name should live on disk:
+// the main clone, which owns the git object store and doubles as the
+// repo's default checkout. Does not check existence. The name is validated
+// so the result is always a direct child of ProjectsRoot — a name like
+// "../evil" must never produce a path outside the managed tree (remove
+// feeds this path to os.RemoveAll).
 func ProjectPath(name string) (string, error) {
 	if err := ValidateName(name); err != nil {
 		return "", err
@@ -58,8 +60,45 @@ func ProjectPath(name string) (string, error) {
 	return filepath.Join(root, name), nil
 }
 
-// ValidateName rejects project names that cannot safely be used as a single
-// path component under ProjectsRoot.
+// CheckoutPath returns where the worktree for ref of the given repo should
+// live on disk: a sibling of the main clone named "<repo>@<ref>", with
+// path separators in the ref flattened to '-' so the result stays a direct
+// child of ProjectsRoot. The handle itself (CheckoutID) keeps the ref
+// verbatim; only the directory name is lossy.
+func CheckoutPath(repo, ref string) (string, error) {
+	if err := ValidateName(repo); err != nil {
+		return "", err
+	}
+	if err := ValidateRef(ref); err != nil {
+		return "", err
+	}
+	root, err := ProjectsRoot()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, repo+"@"+strings.ReplaceAll(ref, "/", "-")), nil
+}
+
+// CheckoutID is the handle for a versioned checkout: "<repo>@<ref>", the
+// inverse of SplitID. The default checkout (the main clone) is addressed
+// by the bare repo name.
+func CheckoutID(repo, ref string) string {
+	return repo + "@" + ref
+}
+
+// SplitID parses a checkout handle into its repo name and ref. A bare repo
+// name yields an empty ref (the default checkout). Refs may themselves
+// contain '@', so the split happens at the first one.
+func SplitID(id string) (repo, ref string) {
+	if i := strings.IndexByte(id, '@'); i >= 0 {
+		return id[:i], id[i+1:]
+	}
+	return id, ""
+}
+
+// ValidateName rejects repo names that cannot safely be used as a single
+// path component under ProjectsRoot, or that would be ambiguous as a
+// checkout handle ('@' separates repo from ref).
 func ValidateName(name string) error {
 	switch {
 	case name == "":
@@ -68,8 +107,39 @@ func ValidateName(name string) error {
 		return fmt.Errorf("invalid project name %q", name)
 	case strings.ContainsAny(name, `/\`):
 		return fmt.Errorf("invalid project name %q: must not contain path separators", name)
+	case strings.ContainsRune(name, '@'):
+		return fmt.Errorf("invalid project name %q: '@' is reserved for checkout handles (<repo>@<ref>)", name)
 	case strings.ContainsRune(name, 0):
 		return fmt.Errorf("invalid project name %q: must not contain NUL", name)
+	}
+	return nil
+}
+
+// ValidateRef rejects refs that git would refuse or that could not be
+// flattened into a safe path component by CheckoutPath. It is deliberately
+// stricter than git's own rules: a ref is an agent-supplied string that
+// ends up both on the git command line and on disk.
+func ValidateRef(ref string) error {
+	switch {
+	case ref == "":
+		return fmt.Errorf("ref is empty")
+	case ref == "HEAD" || ref == "@" || strings.Contains(ref, "@{"):
+		return fmt.Errorf("invalid ref %q: symbolic refs cannot be pinned; name a branch, tag, or commit", ref)
+	case strings.HasPrefix(ref, "refs/") || strings.HasPrefix(ref, "origin/"):
+		return fmt.Errorf("invalid ref %q: use the bare branch or tag name (no refs/ or origin/ prefix)", ref)
+	case strings.HasPrefix(ref, "-"):
+		return fmt.Errorf("invalid ref %q: must not start with '-'", ref)
+	case strings.Contains(ref, ".."):
+		return fmt.Errorf("invalid ref %q: must not contain '..'", ref)
+	case strings.HasPrefix(ref, "/") || strings.HasSuffix(ref, "/") || strings.Contains(ref, "//"):
+		return fmt.Errorf("invalid ref %q: malformed path component", ref)
+	case strings.ContainsAny(ref, "\\ \t\n\x00~^:?*["):
+		return fmt.Errorf("invalid ref %q: contains characters git refuses in ref names", ref)
+	}
+	for _, comp := range strings.Split(ref, "/") {
+		if comp == "." || comp == ".." {
+			return fmt.Errorf("invalid ref %q: malformed path component", ref)
+		}
 	}
 	return nil
 }
@@ -112,6 +182,11 @@ func ResolveInRoot(root, rel string) (string, error) {
 		return "", fmt.Errorf("%s: absolute paths are not allowed", rel)
 	}
 	abs := filepath.Join(root, rel) // Join cleans the result
+	// .git is git's own state, never project content: a directory in the
+	// main clone, a pointer file in a linked worktree.
+	if r, err := filepath.Rel(root, abs); err == nil && (r == ".git" || strings.HasPrefix(r, ".git"+string(filepath.Separator))) {
+		return "", fmt.Errorf("%s: git metadata is not readable", rel)
+	}
 	if !isWithin(root, abs) {
 		return "", fmt.Errorf("%s: escapes the project root", rel)
 	}

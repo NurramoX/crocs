@@ -41,7 +41,7 @@ var logCmd = &cobra.Command{
 		}
 		hint := ""
 		if p.Shallow {
-			hint = shallowHint(p.Name, "history is truncated at fetch depth")
+			hint = shallowHint(p.Repo, "history is truncated at fetch depth")
 		}
 		return output.Write(cmd.OutOrStdout(), "log", logResponse{
 			Name:    p.Name,

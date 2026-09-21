@@ -1,6 +1,11 @@
-// Package registry owns the SQLite database that tracks projects and
-// (Phase 2+) symbols. Schema is PLAN.md §4 v2. Pure-Go driver via
+// Package registry owns the SQLite database that tracks repos, their
+// checkouts, and the per-checkout symbol index. Pure-Go driver via
 // modernc.org/sqlite — no CGO.
+//
+// A repo is one git object store (the main clone). A checkout is one
+// working tree of that repo: the main clone itself (the default checkout,
+// addressed by the bare repo name) or a git worktree pinned to another ref
+// (addressed as "<repo>@<ref>"). Every query command operates on a checkout.
 package registry
 
 import (
@@ -17,27 +22,57 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// SchemaVersion is the current registry schema version. Stored via
-// PRAGMA user_version. Breaking changes bump this and refuse to open.
-const SchemaVersion = 2
+// SchemaVersion is the current registry schema version, stored via PRAGMA
+// user_version. A registry at any other version is wiped and recreated on
+// open — schema changes replace, they never migrate.
+const SchemaVersion = 3
 
 // ErrNotFound is returned when a query expects a row and finds none.
 var ErrNotFound = errors.New("not found")
 
-// ErrIncompatibleSchema is returned when the registry on disk was written by
-// an older or newer crocs whose schema this binary does not understand.
-var ErrIncompatibleSchema = errors.New("incompatible registry schema")
-
-// Project is a registry row in the projects table.
-type Project struct {
-	Name       string
-	URL        string
-	Path       string
-	DefaultRef string // branch/tag checked out at fetch time; may be empty
-	Shallow    bool
-	FetchedAt  time.Time
-	ParsedAt   *time.Time // nil until Phase 2 builds the symbol index
+// Repo is a row in the repos table: one cloned git object store.
+type Repo struct {
+	Name      string
+	URL       string
+	Path      string // main clone; owns .git and is the default checkout's worktree
+	Shallow   bool
+	FetchedAt time.Time
 }
+
+// Checkout is a row in the checkouts table: one working tree of a repo.
+type Checkout struct {
+	ID        string // "<repo>" for the default checkout, "<repo>@<ref>" otherwise
+	Repo      string
+	Ref       string // branch, tag, or commit the checkout was resolved from
+	Kind      string // "branch", "tag", or "commit"
+	Commit    string // resolved commit hash
+	Path      string
+	UpdatedAt time.Time // last time the working tree moved
+	ParsedAt  *time.Time
+}
+
+// Project is a checkout joined with its repo — the unit every command
+// operates on. Name is the checkout id: the CLI handle and the symbol-index
+// key. Path is the checkout's working tree; RepoPath is the main clone that
+// git fetch / worktree operations run in.
+type Project struct {
+	Name      string
+	Repo      string
+	URL       string
+	RepoPath  string
+	Shallow   bool
+	FetchedAt time.Time
+	Ref       string
+	Kind      string
+	Commit    string
+	Path      string
+	UpdatedAt time.Time
+	ParsedAt  *time.Time
+}
+
+// IsDefault reports whether this is the repo's default checkout (the main
+// clone) rather than a versioned worktree.
+func (p Project) IsDefault() bool { return p.Name == p.Repo }
 
 // DB wraps a sql.DB with our schema helpers.
 type DB struct {
@@ -66,7 +101,10 @@ func OpenAt(ctx context.Context, path string) (*DB, error) {
 }
 
 func openAt(ctx context.Context, path string) (*DB, error) {
-	sqldb, err := sql.Open("sqlite", path)
+	// busy_timeout: concurrent crocs processes (parallel checkouts from
+	// several subagents) queue on the write lock instead of failing with
+	// "database is locked".
+	sqldb, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(10000)")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
@@ -78,7 +116,6 @@ func openAt(ctx context.Context, path string) (*DB, error) {
 	for _, p := range []string{
 		"PRAGMA journal_mode=WAL",
 		"PRAGMA synchronous=NORMAL",
-		"PRAGMA foreign_keys=ON",
 	} {
 		if _, err := sqldb.ExecContext(ctx, p); err != nil {
 			sqldb.Close()
@@ -86,9 +123,15 @@ func openAt(ctx context.Context, path string) (*DB, error) {
 		}
 	}
 	db := &DB{sql: sqldb}
-	if err := db.migrate(ctx); err != nil {
+	// Schema resets drop tables that reference each other; do that before
+	// foreign keys are enforced.
+	if err := db.ensureSchema(ctx); err != nil {
 		sqldb.Close()
 		return nil, err
+	}
+	if _, err := sqldb.ExecContext(ctx, "PRAGMA foreign_keys=ON"); err != nil {
+		sqldb.Close()
+		return nil, fmt.Errorf("PRAGMA foreign_keys=ON: %w", err)
 	}
 	return db, nil
 }
@@ -96,55 +139,79 @@ func openAt(ctx context.Context, path string) (*DB, error) {
 // Close releases the underlying database handle.
 func (db *DB) Close() error { return db.sql.Close() }
 
-func (db *DB) migrate(ctx context.Context) error {
+// ensureSchema makes the on-disk registry match this binary. Anything
+// other than the current schema version — an older crocs, a newer one, an
+// unversioned file — is dropped and recreated: there is no migration path,
+// by design (see CLAUDE.md). Clones on disk are untouched; re-fetch to
+// track them again.
+func (db *DB) ensureSchema(ctx context.Context) error {
 	var version int
 	if err := db.sql.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return fmt.Errorf("read user_version: %w", err)
 	}
-	switch {
-	case version == 0:
-		// Fresh db OR a foreign (e.g. Python-crocs) db at the same path that
-		// never set user_version. If our expected tables already exist, refuse
-		// rather than corrupt: PLAN.md §2 Breaking Change #5 says no importer,
-		// the user re-fetches fresh.
-		var anyTable int
-		if err := db.sql.QueryRowContext(ctx,
-			`SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('projects','symbols')`,
-		).Scan(&anyTable); err != nil {
-			return fmt.Errorf("probe existing tables: %w", err)
-		}
-		if anyTable > 0 {
-			return fmt.Errorf("%w: registry has unversioned tables (likely a pre-v2 install); remove the registry file and re-fetch",
-				ErrIncompatibleSchema)
-		}
-		if _, err := db.sql.ExecContext(ctx, schemaV2); err != nil {
-			return fmt.Errorf("apply schema v%d: %w", SchemaVersion, err)
-		}
-		if _, err := db.sql.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", SchemaVersion)); err != nil {
-			return fmt.Errorf("set user_version: %w", err)
-		}
-	case version == SchemaVersion:
-		// Up to date.
-	default:
-		return fmt.Errorf("%w: db is v%d, this binary expects v%d",
-			ErrIncompatibleSchema, version, SchemaVersion)
+	if version == SchemaVersion {
+		return nil
 	}
-	return nil
+	rows, err := db.sql.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`)
+	if err != nil {
+		return fmt.Errorf("list tables: %w", err)
+	}
+	var drops []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return err
+		}
+		drops = append(drops, "DROP TABLE "+name)
+	}
+	rows.Close()
+	if len(drops) > 0 {
+		fmt.Fprintf(os.Stderr, "crocs: registry schema is v%d, this binary uses v%d; resetting the registry (clones on disk are kept — re-fetch to track them)\n", version, SchemaVersion)
+	}
+	return db.exec(ctx, "apply schema", append(drops, schema, setVersion)...)
 }
 
-const schemaV2 = `
-CREATE TABLE projects (
+// exec runs the statements in one transaction.
+func (db *DB) exec(ctx context.Context, what string, stmts ...string) error {
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after Commit
+	for _, s := range stmts {
+		if _, err := tx.ExecContext(ctx, s); err != nil {
+			return fmt.Errorf("%s: %w", what, err)
+		}
+	}
+	return tx.Commit()
+}
+
+var setVersion = fmt.Sprintf("PRAGMA user_version = %d", SchemaVersion)
+
+const schema = `
+CREATE TABLE repos (
   name        TEXT PRIMARY KEY,
   url         TEXT NOT NULL,
   path        TEXT NOT NULL,
-  default_ref TEXT,
   shallow     INTEGER NOT NULL,
-  fetched_at  INTEGER NOT NULL,
-  parsed_at   INTEGER
+  fetched_at  INTEGER NOT NULL
 );
 
+CREATE TABLE checkouts (
+  id          TEXT PRIMARY KEY,
+  repo        TEXT NOT NULL REFERENCES repos(name) ON DELETE CASCADE,
+  ref         TEXT NOT NULL,
+  kind        TEXT NOT NULL,
+  commit_hash TEXT NOT NULL,
+  path        TEXT NOT NULL,
+  updated_at  INTEGER NOT NULL,
+  parsed_at   INTEGER
+);
+CREATE INDEX idx_checkouts_repo ON checkouts(repo);
+
 CREATE TABLE symbols (
-  project   TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
+  project   TEXT NOT NULL REFERENCES checkouts(id) ON DELETE CASCADE,
   path      TEXT NOT NULL,
   name      TEXT NOT NULL,
   kind      TEXT NOT NULL,
@@ -158,31 +225,41 @@ CREATE INDEX idx_symbols_name_proj ON symbols(name, project);
 CREATE INDEX idx_symbols_kind_proj ON symbols(kind, project);
 `
 
-// InsertProject inserts a new project. Returns an error wrapping
-// sqlite's unique-constraint message if name is already taken.
-func (db *DB) InsertProject(ctx context.Context, p Project) error {
+// InsertRepo inserts a new repo. Returns an error wrapping sqlite's
+// unique-constraint message if name is already taken.
+func (db *DB) InsertRepo(ctx context.Context, r Repo) error {
 	_, err := db.sql.ExecContext(ctx,
-		`INSERT INTO projects(name, url, path, default_ref, shallow, fetched_at, parsed_at)
-		 VALUES(?,?,?,?,?,?,?)`,
-		p.Name, p.URL, p.Path, nullStr(p.DefaultRef), boolToInt(p.Shallow),
-		p.FetchedAt.Unix(), nullTime(p.ParsedAt),
+		`INSERT INTO repos(name, url, path, shallow, fetched_at) VALUES(?,?,?,?,?)`,
+		r.Name, r.URL, r.Path, boolToInt(r.Shallow), r.FetchedAt.Unix(),
 	)
 	return err
 }
 
-// GetProject returns the project with the given name or ErrNotFound.
-func (db *DB) GetProject(ctx context.Context, name string) (Project, error) {
-	row := db.sql.QueryRowContext(ctx,
-		`SELECT name, url, path, default_ref, shallow, fetched_at, parsed_at
-		 FROM projects WHERE name = ?`, name)
-	return scanProject(row)
+// InsertCheckout inserts a new checkout. The repo must already exist.
+func (db *DB) InsertCheckout(ctx context.Context, c Checkout) error {
+	_, err := db.sql.ExecContext(ctx,
+		`INSERT INTO checkouts(id, repo, ref, kind, commit_hash, path, updated_at, parsed_at)
+		 VALUES(?,?,?,?,?,?,?,?)`,
+		c.ID, c.Repo, c.Ref, c.Kind, c.Commit, c.Path, c.UpdatedAt.Unix(), nullTime(c.ParsedAt),
+	)
+	return err
 }
 
-// ListProjects returns all projects sorted by name.
+const projectSelect = `
+SELECT c.id, c.repo, r.url, r.path, r.shallow, r.fetched_at,
+       c.ref, c.kind, c.commit_hash, c.path, c.updated_at, c.parsed_at
+  FROM checkouts c JOIN repos r ON r.name = c.repo`
+
+// GetProject returns the checkout with the given id, joined with its repo,
+// or ErrNotFound.
+func (db *DB) GetProject(ctx context.Context, id string) (Project, error) {
+	return scanProject(db.sql.QueryRowContext(ctx, projectSelect+` WHERE c.id = ?`, id))
+}
+
+// ListProjects returns every checkout joined with its repo, grouped by repo
+// with the default checkout first and the rest sorted by id.
 func (db *DB) ListProjects(ctx context.Context) ([]Project, error) {
-	rows, err := db.sql.QueryContext(ctx,
-		`SELECT name, url, path, default_ref, shallow, fetched_at, parsed_at
-		 FROM projects ORDER BY name`)
+	rows, err := db.sql.QueryContext(ctx, projectSelect+` ORDER BY c.repo, (c.id = c.repo) DESC, c.id`)
 	if err != nil {
 		return nil, err
 	}
@@ -198,10 +275,21 @@ func (db *DB) ListProjects(ctx context.Context) ([]Project, error) {
 	return out, rows.Err()
 }
 
-// DeleteProject removes the project row. Cascades to symbols via FK.
-func (db *DB) DeleteProject(ctx context.Context, name string) error {
-	res, err := db.sql.ExecContext(ctx,
-		`DELETE FROM projects WHERE name = ?`, name)
+// DeleteRepo removes the repo row. Cascades to its checkouts and their
+// symbols via FK.
+func (db *DB) DeleteRepo(ctx context.Context, name string) error {
+	return db.deleteOne(ctx, `DELETE FROM repos WHERE name = ?`, name)
+}
+
+// DeleteCheckout removes one checkout row. Cascades to its symbols via FK.
+// Callers must not delete a repo's default checkout this way — remove the
+// repo instead.
+func (db *DB) DeleteCheckout(ctx context.Context, id string) error {
+	return db.deleteOne(ctx, `DELETE FROM checkouts WHERE id = ?`, id)
+}
+
+func (db *DB) deleteOne(ctx context.Context, stmt, key string) error {
+	res, err := db.sql.ExecContext(ctx, stmt, key)
 	if err != nil {
 		return err
 	}
@@ -212,19 +300,20 @@ func (db *DB) DeleteProject(ctx context.Context, name string) error {
 	return nil
 }
 
-// UpdateProjectRef updates default_ref + fetched_at; used by checkout/update.
-func (db *DB) UpdateProjectRef(ctx context.Context, name, ref string, fetchedAt time.Time) error {
+// SetSnapshot records that a checkout's working tree now sits at ref
+// (of the given kind) / commit; used by update.
+func (db *DB) SetSnapshot(ctx context.Context, id, ref, kind, commit string, at time.Time) error {
 	_, err := db.sql.ExecContext(ctx,
-		`UPDATE projects SET default_ref = ?, fetched_at = ? WHERE name = ?`,
-		nullStr(ref), fetchedAt.Unix(), name)
+		`UPDATE checkouts SET ref = ?, kind = ?, commit_hash = ?, updated_at = ? WHERE id = ?`,
+		ref, kind, commit, at.Unix(), id)
 	return err
 }
 
-// SetShallow updates the shallow flag; used by unshallow.
-func (db *DB) SetShallow(ctx context.Context, name string, shallow bool) error {
+// SetShallow updates a repo's shallow flag; used by unshallow.
+func (db *DB) SetShallow(ctx context.Context, repo string, shallow bool) error {
 	_, err := db.sql.ExecContext(ctx,
-		`UPDATE projects SET shallow = ? WHERE name = ?`,
-		boolToInt(shallow), name)
+		`UPDATE repos SET shallow = ? WHERE name = ?`,
+		boolToInt(shallow), repo)
 	return err
 }
 
@@ -235,34 +324,26 @@ type rowScanner interface {
 func scanProject(r rowScanner) (Project, error) {
 	var (
 		p         Project
-		ref       sql.NullString
 		shallow   int
 		fetchedAt int64
+		updatedAt int64
 		parsedAt  sql.NullInt64
 	)
-	if err := r.Scan(&p.Name, &p.URL, &p.Path, &ref, &shallow, &fetchedAt, &parsedAt); err != nil {
+	if err := r.Scan(&p.Name, &p.Repo, &p.URL, &p.RepoPath, &shallow, &fetchedAt,
+		&p.Ref, &p.Kind, &p.Commit, &p.Path, &updatedAt, &parsedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Project{}, ErrNotFound
 		}
 		return Project{}, err
 	}
-	if ref.Valid {
-		p.DefaultRef = ref.String
-	}
 	p.Shallow = shallow != 0
 	p.FetchedAt = time.Unix(fetchedAt, 0).UTC()
+	p.UpdatedAt = time.Unix(updatedAt, 0).UTC()
 	if parsedAt.Valid {
 		t := time.Unix(parsedAt.Int64, 0).UTC()
 		p.ParsedAt = &t
 	}
 	return p, nil
-}
-
-func nullStr(s string) any {
-	if s == "" {
-		return nil
-	}
-	return s
 }
 
 func nullTime(t *time.Time) any {

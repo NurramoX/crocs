@@ -75,9 +75,10 @@ func runRipgrep(ctx context.Context, root string, opts Options) (Result, error) 
 
 	// --hidden keeps the corpus aligned with the Go fallback (which walks
 	// dotfiles) and with what doc research wants: .github/ workflows and
-	// friends are prime material. .git itself stays excluded, as do
-	// nested .git dirs (submodules).
-	args := []string{"--json", "--hidden", "--glob", "!**/.git/**"}
+	// friends are prime material. .git itself stays excluded — the
+	// directory and its contents in a clone, the gitdir pointer file in a
+	// linked worktree — as do nested .git dirs (submodules).
+	args := []string{"--json", "--hidden", "--glob", "!**/.git", "--glob", "!**/.git/**"}
 	if opts.Context > 0 {
 		args = append(args, fmt.Sprintf("--context=%d", opts.Context))
 	}

@@ -23,6 +23,10 @@ var rootCmd = &cobra.Command{
 	Long: `crocs fetches and tracks git repositories so disposable subagents can
 grep, read, and reason over them without bloating the parent agent's context.
 
+Every command's <name> is a checkout handle: the repo name for its default
+checkout (e.g. "myrepo"), or "<repo>@<ref>" for a version pinned with
+` + "`crocs checkout`" + ` (e.g. "myrepo@v1.8.0"). Handles work everywhere.
+
 JSON is the default output format on every command except read-files
 (XML envelope). The _meta envelope carries the schema version: branch on
 _meta.crocs for forward-compatible scripting.`,

@@ -39,6 +39,8 @@ crocs grep cobra "completion" -i completions.go -C 1
 crocs read-files cobra completions.go --lines 200-300
 crocs symbols cobra -p completions.go
 crocs symbols --name Complete --kind function,method
+crocs checkout cobra v1.8.0        # pin a version beside main → cobra@v1.8.0
+crocs grep cobra@v1.8.0 "completion" -i completions.go
 ```
 
 ## Commands
@@ -48,15 +50,44 @@ crocs symbols --name Complete --kind function,method
 | **Registry** | `fetch`, `list`, `info`, `path`, `remove` |
 | **Orient** | `summary`, `tree`, `map`, `detect` |
 | **Query** | `grep`, `read-files`, `symbols` |
-| **VCS** | `branches`, `tags`, `log`, `diff`, `checkout`, `update`, `update-all`, `unshallow` |
+| **Versions** | `checkout`, `update`, `update-all`, `unshallow` |
+| **History** | `branches`, `tags`, `log`, `diff` |
 | **Skill** | `install-skill` |
 
-The default fetch is a shallow single-branch clone, so `branches`/`tags`/
-`log` see only the fetched ref until `crocs unshallow <name>` — their JSON
-carries `"shallow": true` plus a hint when that's the case, and `checkout`/
-`diff` errors say so explicitly.
-
 Run `crocs <command> --help` for flags.
+
+## Repos and checkouts
+
+A tracked repo is one git clone that owns the object store. Every version
+you want to look at is a **checkout** with its own working tree and its own
+symbol index, addressed by a handle that every command accepts as `<name>`:
+
+- `cobra` — the default checkout, i.e. the clone itself (remote HEAD, or
+  `--ref` at fetch time). `crocs update cobra` syncs it to origin.
+- `cobra@v1.8.0` — a pinned checkout created by `crocs checkout cobra
+  v1.8.0`: a git worktree sharing cobra's objects, detached at that ref.
+  Branches, tags, and commit hashes all work; `crocs checkout cobra@v1.8.0`
+  is accepted as shorthand.
+
+```sh
+crocs checkout cobra v1.8.0                  # ~2s: depth-1 fetch + worktree + index
+crocs checkout cobra v1.7.0
+crocs symbols --name Complete --projects cobra,cobra@v1.8.0,cobra@v1.7.0
+crocs diff cobra --from v1.7.0 --to v1.8.0 --stat
+crocs update cobra@main                      # re-resolve a pinned branch
+crocs remove cobra@v1.7.0                    # just that worktree
+crocs remove cobra                           # the clone and every checkout
+```
+
+Pinned checkouts never disturb the default one, so a subagent grepping
+`cobra` keeps seeing `main` while another reads `cobra@v1.8.0`. Refs are
+fetched from origin on demand (at depth 1 on shallow clones), and `diff`
+resolves `--from`/`--to` the same way, so neither needs `unshallow`.
+
+`unshallow` is only for *history*: the default fetch is a shallow
+single-branch clone, so `branches`/`tags`/`log` see only the fetched refs
+until `crocs unshallow <name>`. Their JSON carries `"shallow": true` plus a
+hint when that's the case.
 
 ## Output format
 
@@ -134,9 +165,14 @@ column.
   grammars are subset-embedded into the binary at build time — see the
   `grammar_subset_*` tags in the `Makefile`.
 - **SQLite** via `modernc.org/sqlite`. The registry lives at
-  `$XDG_DATA_HOME/crocs/registry.db` (or `~/.local/share/crocs/`).
+  `$XDG_DATA_HOME/crocs/registry.db` (or `~/.local/share/crocs/`); tables
+  are `repos`, `checkouts`, and `symbols` (keyed by checkout id). A
+  registry written by another schema version is wiped and recreated on
+  open — no migrations, ever (see `CLAUDE.md`).
 - **Git** via the system `git` CLI when present (blobless + shallow
-  clones), with `go-git` as the in-process fallback.
+  clones, on-demand ref fetches, worktrees), with `go-git` as the
+  in-process fallback for cloning and read-only inspection. Pinned
+  checkouts require the CLI.
 - **`ripgrep`** for `grep` when present, pure-Go regex + parallel walk
   otherwise.
 - **No server.** Agents reach crocs only through the CLI and the skill.
@@ -146,8 +182,8 @@ column.
 ```
 cmd/crocs/      cobra wiring, one file per subcommand
 internal/
-  registry/     SQLite schema + projects/symbols CRUD
-  vcs/          git CLI + go-git
+  registry/     SQLite schema + repos/checkouts/symbols CRUD
+  vcs/          git CLI + go-git; on-demand ref resolution, worktrees
   grepx/        ripgrep + pure-Go fallback
   symbols/      gotreesitter extraction pipeline
   files/        read-files XML bundler
@@ -155,7 +191,7 @@ internal/
   treemap/      file walks shared by tree, map, detect
   detect/       extension → language histogram
   output/       JSON envelope writer
-  project/      XDG paths + name normalization
+  project/      XDG paths, name/ref validation, checkout handles
 skills/crocs/   the agent skill (SKILL.md + BRIEF.md), embedded into the binary
 ```
 

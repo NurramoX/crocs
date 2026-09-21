@@ -9,6 +9,7 @@ import (
 
 type tagsResponse struct {
 	Name      string    `json:"name"`
+	Repo      string    `json:"repo"`
 	Shallow   bool      `json:"shallow"`
 	Hint      string    `json:"hint,omitempty"`
 	Tags      []vcs.Tag `json:"tags"`
@@ -45,10 +46,11 @@ var tagsCmd = &cobra.Command{
 		if p.Shallow {
 			// The single most misleading output in the old CLI: a confident
 			// empty tag list on every fresh clone. Say why it's empty.
-			hint = shallowHint(p.Name, "tags were not fetched")
+			hint = shallowHint(p.Repo, "tags were not fetched")
 		}
 		return output.Write(cmd.OutOrStdout(), "tags", tagsResponse{
 			Name:      p.Name,
+			Repo:      p.Repo,
 			Shallow:   p.Shallow,
 			Hint:      hint,
 			Tags:      tags,

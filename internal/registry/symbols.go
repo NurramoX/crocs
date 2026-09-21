@@ -8,9 +8,9 @@ import (
 	"time"
 )
 
-// SymbolInput is what callers hand the registry to persist. The Project +
-// Path fields scope each row; the rest of the columns mirror the symbols
-// table in schema v2.
+// SymbolInput is what callers hand the registry to persist. Project is the
+// checkout id that scopes the row; the rest of the columns mirror the
+// symbols table.
 type SymbolInput struct {
 	Project string
 	Path    string
@@ -34,9 +34,9 @@ type SymbolRow struct {
 	Lang    string
 }
 
-// ReplaceSymbols atomically replaces the entire symbol set for a project
-// and stamps projects.parsed_at = now. Used by fetch and by snapshot-
-// changing ops (update/checkout/unshallow) — PLAN.md §5 last paragraph.
+// ReplaceSymbols atomically replaces the entire symbol set for a checkout
+// and stamps its parsed_at = now. Used by fetch and by every op that moves
+// a working tree (checkout, update).
 //
 // Bulk-inserts in a single transaction so even ~25k rows complete in well
 // under a second on commodity hardware (measured 171k rows/s).
@@ -75,7 +75,7 @@ func (db *DB) ReplaceSymbols(ctx context.Context, project string, rows []SymbolI
 	}
 
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE projects SET parsed_at = ? WHERE name = ?`,
+		`UPDATE checkouts SET parsed_at = ? WHERE id = ?`,
 		time.Now().UTC().Unix(), project,
 	); err != nil {
 		return fmt.Errorf("stamp parsed_at: %w", err)
@@ -189,9 +189,9 @@ func (db *DB) FindSymbols(ctx context.Context, q SymbolQuery) ([]SymbolRow, erro
 	return out, rows.Err()
 }
 
-// CountSymbols returns the number of indexed symbols for a project. Used by
+// CountSymbols returns the number of indexed symbols for a checkout. Used by
 // commands that leave an existing index untouched (update with an unmoved
-// HEAD, unshallow) but still report symbol_count.
+// HEAD) but still report symbol_count.
 func (db *DB) CountSymbols(ctx context.Context, project string) (int, error) {
 	var n int
 	err := db.sql.QueryRowContext(ctx, `SELECT count(*) FROM symbols WHERE project = ?`, project).Scan(&n)

@@ -34,7 +34,9 @@ var fetchCmd = &cobra.Command{
 	Short: "Clone a git repo and track it",
 	Long: `Clone a git repo to $XDG_DATA_HOME/crocs/projects/<name> and register it
 in the local registry. By default the clone is shallow + blobless (when the
-git CLI is available); use --full for a complete history.`,
+git CLI is available); use --full for a complete history. The clone is the
+repo's default checkout; pin other versions beside it with
+` + "`crocs checkout <name> <ref>`" + `.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmdCtx(cmd)
@@ -84,23 +86,27 @@ git CLI is available); use --full for a complete history.`,
 			return fmt.Errorf("clone %s: %w", url, err)
 		}
 
-		ref, refErr := vcs.CurrentRef(dest)
 		resp := fetchResponse{Engine: res.Engine}
+		ref, refErr := vcs.CurrentRef(dest)
 		if refErr != nil {
-			// Non-fatal: we still track the repo, just without a default_ref.
+			// Non-fatal: we still track the repo, just without a ref.
 			ref = ""
 			resp.RefError = refErr.Error()
 		}
+		commit, _ := vcs.HeadHash(dest)
 
-		p := registry.Project{
-			Name:       name,
-			URL:        url,
-			Path:       dest,
-			DefaultRef: ref,
-			Shallow:    res.Shallow,
-			FetchedAt:  time.Now().UTC(),
+		now := time.Now().UTC()
+		if err := db.InsertRepo(ctx, registry.Repo{
+			Name: name, URL: url, Path: dest, Shallow: res.Shallow, FetchedAt: now,
+		}); err == nil {
+			err = db.InsertCheckout(ctx, registry.Checkout{
+				ID: name, Repo: name, Ref: ref, Kind: string(vcs.HeadKind(dest)), Commit: commit, Path: dest, UpdatedAt: now,
+			})
+			if err != nil {
+				_ = db.DeleteRepo(ctx, name)
+			}
 		}
-		if err := db.InsertProject(ctx, p); err != nil {
+		if err != nil {
 			// Don't strand the fresh clone on disk: an orphaned directory
 			// blocks the next fetch of the same name.
 			if rmErr := os.RemoveAll(dest); rmErr != nil {
@@ -109,21 +115,22 @@ git CLI is available); use --full for a complete history.`,
 			return fmt.Errorf("register project: %w", err)
 		}
 
-		// PLAN.md §2 #4: fetch eagerly parses and persists the symbol index
-		// at clone time. Budget ≤60s on the largest target repos.
+		p, err := db.GetProject(ctx, name)
+		if err != nil {
+			return err
+		}
+		// fetch eagerly parses and persists the symbol index at clone time.
 		nSym, err := reparseProject(ctx, db, p)
 		if err != nil {
 			// Symbol indexing failure is non-fatal: the clone is on disk and
 			// registered, so grep/read-files still work.
 			resp.ReindexError = err.Error()
 		}
-
 		// Reload to pick up parsed_at updated by ReplaceSymbols.
-		if refreshed, err := db.GetProject(ctx, p.Name); err == nil {
+		if refreshed, err := db.GetProject(ctx, name); err == nil {
 			p = refreshed
 		}
-
-		resp.Project = projectToJSON(p)
+		resp.Project = groupProjects([]registry.Project{p})[0]
 		resp.SymbolCount = nSym
 		return output.Write(cmd.OutOrStdout(), "fetch", resp)
 	},
@@ -132,6 +139,6 @@ git CLI is available); use --full for a complete history.`,
 func init() {
 	fetchCmd.Flags().StringVar(&fetchName, "name", "", "override the project name (default: derived from URL)")
 	fetchCmd.Flags().BoolVar(&fetchFull, "full", false, "force a full (non-shallow, non-blobless) clone")
-	fetchCmd.Flags().StringVar(&fetchRef, "ref", "", "branch or tag to check out (default: remote HEAD)")
+	fetchCmd.Flags().StringVar(&fetchRef, "ref", "", "branch or tag for the default checkout (default: remote HEAD)")
 	rootCmd.AddCommand(fetchCmd)
 }

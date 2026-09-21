@@ -67,3 +67,78 @@ func TestProjectPathStaysUnderRoot(t *testing.T) {
 		t.Errorf("ProjectPath escaped root: %q", p)
 	}
 }
+
+func TestValidateRef(t *testing.T) {
+	valid := []string{"main", "v1.8.0", "release/1.x", "feature-x_y", "a0a6ae020bb3899ff0276067863e50523f897370", "v1@2"}
+	for _, r := range valid {
+		if err := ValidateRef(r); err != nil {
+			t.Errorf("ValidateRef(%q) = %v, want nil", r, err)
+		}
+	}
+	invalid := []string{"", "-x", "--depth=1", "..", "a..b", "/main", "main/", "a//b", "a/../b", "a b", "a\tb", "x\x00y", `a\b`, "a~1", "a^2", "a:b", "a?", "a*", "a[b",
+		"HEAD", "@", "main@{1}", "refs/heads/main", "origin/main"}
+	for _, r := range invalid {
+		if err := ValidateRef(r); err == nil {
+			t.Errorf("ValidateRef(%q) = nil, want error", r)
+		}
+	}
+}
+
+func TestValidateNameRejectsAt(t *testing.T) {
+	if err := ValidateName("cobra@v1"); err == nil {
+		t.Error("ValidateName must reject '@' (reserved for checkout handles)")
+	}
+}
+
+func TestSplitIDAndCheckoutID(t *testing.T) {
+	cases := []struct{ id, repo, ref string }{
+		{"cobra", "cobra", ""},
+		{"cobra@v1.8.0", "cobra", "v1.8.0"},
+		{"cobra@release/1.x", "cobra", "release/1.x"},
+		{"cobra@v1@2", "cobra", "v1@2"},
+	}
+	for _, c := range cases {
+		repo, ref := SplitID(c.id)
+		if repo != c.repo || ref != c.ref {
+			t.Errorf("SplitID(%q) = %q, %q; want %q, %q", c.id, repo, ref, c.repo, c.ref)
+		}
+		if ref != "" && CheckoutID(repo, ref) != c.id {
+			t.Errorf("CheckoutID(%q, %q) = %q, want %q (handles must round-trip)", repo, ref, CheckoutID(repo, ref), c.id)
+		}
+	}
+}
+
+func TestCheckoutPathStaysUnderRoot(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	root, err := ProjectsRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := CheckoutPath("cobra", "release/1.x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(p) != root {
+		t.Errorf("CheckoutPath(cobra, release/1.x) = %q, not a direct child of %q", p, root)
+	}
+	if filepath.Base(p) != "cobra@release-1.x" {
+		t.Errorf("CheckoutPath flattened name = %q", filepath.Base(p))
+	}
+	for _, c := range [][2]string{{"../evil", "v1"}, {"cobra", "../evil"}, {"cobra", ""}, {"cobra", "-x"}} {
+		if _, err := CheckoutPath(c[0], c[1]); err == nil {
+			t.Errorf("CheckoutPath(%q, %q) succeeded, want error", c[0], c[1])
+		}
+	}
+}
+
+func TestResolveInRootHidesGit(t *testing.T) {
+	root := t.TempDir()
+	for _, rel := range []string{".git", ".git/config", "sub/../.git"} {
+		if _, err := ResolveInRoot(root, rel); err == nil {
+			t.Errorf("ResolveInRoot(%q) succeeded, want error", rel)
+		}
+	}
+	if _, err := ResolveInRoot(root, ".github/workflows/ci.yml"); err != nil {
+		t.Errorf("dotfiles other than .git must resolve: %v", err)
+	}
+}

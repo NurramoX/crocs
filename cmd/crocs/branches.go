@@ -9,6 +9,7 @@ import (
 
 type branchesResponse struct {
 	Name      string       `json:"name"`
+	Repo      string       `json:"repo"`
 	Shallow   bool         `json:"shallow"`
 	Hint      string       `json:"hint,omitempty"`
 	Branches  []vcs.Branch `json:"branches"`
@@ -43,10 +44,11 @@ var branchesCmd = &cobra.Command{
 		branches, truncated := capList(branches, branchesLimit)
 		hint := ""
 		if p.Shallow {
-			hint = shallowHint(p.Name, "remote branches were not fetched")
+			hint = shallowHint(p.Repo, "remote branches were not fetched")
 		}
 		return output.Write(cmd.OutOrStdout(), "branches", branchesResponse{
 			Name:      p.Name,
+			Repo:      p.Repo,
 			Shallow:   p.Shallow,
 			Hint:      hint,
 			Branches:  branches,

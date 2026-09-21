@@ -8,136 +8,184 @@ import (
 	"time"
 )
 
-func TestOpenMigrateInsertGet(t *testing.T) {
-	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "registry.db")
-
-	db, err := OpenAt(ctx, dbPath)
+func openTest(t *testing.T) *DB {
+	t.Helper()
+	db, err := OpenAt(context.Background(), filepath.Join(t.TempDir(), "registry.db"))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	defer db.Close()
+	t.Cleanup(func() { db.Close() })
+	return db
+}
 
-	p := Project{
-		Name:       "demo",
-		URL:        "https://example.com/demo.git",
-		Path:       "/tmp/demo",
-		DefaultRef: "main",
-		Shallow:    true,
-		FetchedAt:  time.Now().UTC().Truncate(time.Second),
+func insertRepo(t *testing.T, db *DB, name string) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := db.InsertRepo(ctx, Repo{Name: name, URL: "https://example.com/" + name, Path: "/tmp/" + name, Shallow: true, FetchedAt: now}); err != nil {
+		t.Fatalf("insert repo %s: %v", name, err)
 	}
-	if err := db.InsertProject(ctx, p); err != nil {
-		t.Fatalf("insert: %v", err)
+	if err := db.InsertCheckout(ctx, Checkout{ID: name, Repo: name, Ref: "main", Kind: "branch", Commit: "abc", Path: "/tmp/" + name, UpdatedAt: now}); err != nil {
+		t.Fatalf("insert default checkout %s: %v", name, err)
 	}
+}
+
+func TestInsertGetJoined(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+	insertRepo(t, db, "demo")
 
 	got, err := db.GetProject(ctx, "demo")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if got.Name != p.Name || got.URL != p.URL || got.DefaultRef != p.DefaultRef || got.Shallow != p.Shallow {
-		t.Errorf("round-trip mismatch:\nwant %+v\ngot  %+v", p, got)
+	if got.Name != "demo" || got.Repo != "demo" || got.URL != "https://example.com/demo" ||
+		got.RepoPath != "/tmp/demo" || got.Path != "/tmp/demo" || !got.Shallow ||
+		got.Ref != "main" || got.Kind != "branch" || got.Commit != "abc" || !got.IsDefault() {
+		t.Errorf("joined project mismatch: %+v", got)
 	}
-	if !got.FetchedAt.Equal(p.FetchedAt) {
-		t.Errorf("FetchedAt mismatch: want %v got %v", p.FetchedAt, got.FetchedAt)
+
+	if err := db.InsertCheckout(ctx, Checkout{ID: "demo@v1", Repo: "demo", Ref: "v1", Kind: "tag", Commit: "def", Path: "/tmp/demo@v1", UpdatedAt: time.Now()}); err != nil {
+		t.Fatalf("insert checkout: %v", err)
+	}
+	v1, err := db.GetProject(ctx, "demo@v1")
+	if err != nil {
+		t.Fatalf("get v1: %v", err)
+	}
+	if v1.IsDefault() || v1.Repo != "demo" || v1.RepoPath != "/tmp/demo" || v1.Path != "/tmp/demo@v1" || !v1.Shallow || v1.Kind != "tag" {
+		t.Errorf("versioned checkout must carry repo columns: %+v", v1)
+	}
+	if err := db.SetSnapshot(ctx, "demo@v1", "v1", "tag", "ghi", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if v1, _ = db.GetProject(ctx, "demo@v1"); v1.Commit != "ghi" {
+		t.Errorf("SetSnapshot not applied: %+v", v1)
 	}
 }
 
 func TestGetMissing(t *testing.T) {
-	ctx := context.Background()
-	db, err := OpenAt(ctx, filepath.Join(t.TempDir(), "r.db"))
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer db.Close()
-
-	if _, err := db.GetProject(ctx, "nope"); !errors.Is(err, ErrNotFound) {
+	db := openTest(t)
+	if _, err := db.GetProject(context.Background(), "nope"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("GetProject(missing) = %v, want ErrNotFound", err)
 	}
 }
 
-func TestList(t *testing.T) {
+func TestListOrdersDefaultFirst(t *testing.T) {
 	ctx := context.Background()
-	db, err := OpenAt(ctx, filepath.Join(t.TempDir(), "r.db"))
-	if err != nil {
-		t.Fatalf("open: %v", err)
+	db := openTest(t)
+	for _, n := range []string{"c", "a"} {
+		insertRepo(t, db, n)
 	}
-	defer db.Close()
-
-	for _, n := range []string{"c", "a", "b"} {
-		if err := db.InsertProject(ctx, Project{
-			Name: n, URL: "u", Path: "p", Shallow: false, FetchedAt: time.Now(),
-		}); err != nil {
-			t.Fatalf("insert %s: %v", n, err)
-		}
+	// "a@0" sorts before "a" lexically; the default checkout must still lead.
+	if err := db.InsertCheckout(ctx, Checkout{ID: "a@0", Repo: "a", Ref: "0", Path: "/tmp/a@0", UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
 	}
 	all, err := db.ListProjects(ctx)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if len(all) != 3 {
-		t.Fatalf("expected 3 rows, got %d", len(all))
+	var ids []string
+	for _, p := range all {
+		ids = append(ids, p.Name)
 	}
-	if all[0].Name != "a" || all[1].Name != "b" || all[2].Name != "c" {
-		t.Errorf("not sorted: %v %v %v", all[0].Name, all[1].Name, all[2].Name)
+	want := []string{"a", "a@0", "c"}
+	if len(ids) != len(want) {
+		t.Fatalf("ids = %v, want %v", ids, want)
 	}
+	for i := range want {
+		if ids[i] != want[i] {
+			t.Fatalf("ids = %v, want %v", ids, want)
+		}
+	}
+}
+
+func countSymbols(t *testing.T, db *DB, id string) int {
+	t.Helper()
+	n, err := db.CountSymbols(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
 }
 
 func TestDeleteCascades(t *testing.T) {
 	ctx := context.Background()
-	db, err := OpenAt(ctx, filepath.Join(t.TempDir(), "r.db"))
-	if err != nil {
-		t.Fatalf("open: %v", err)
+	db := openTest(t)
+	insertRepo(t, db, "x")
+	if err := db.InsertCheckout(ctx, Checkout{ID: "x@v1", Repo: "x", Ref: "v1", Path: "/tmp/x@v1", UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
 	}
-	defer db.Close()
-
-	if err := db.InsertProject(ctx, Project{Name: "x", URL: "u", Path: "p", FetchedAt: time.Now()}); err != nil {
-		t.Fatalf("insert: %v", err)
+	sym := []SymbolInput{{Path: "f.go", Name: "foo", Kind: "function", Line: 1, Lang: "go"}}
+	for _, id := range []string{"x", "x@v1"} {
+		if err := db.ReplaceSymbols(ctx, id, sym); err != nil {
+			t.Fatalf("symbols %s: %v", id, err)
+		}
 	}
-	// Drop a symbol row referencing the project so the FK cascade is tested.
-	if _, err := db.sql.ExecContext(ctx,
-		`INSERT INTO symbols(project, path, name, kind, line, lang) VALUES(?,?,?,?,?,?)`,
-		"x", "f.go", "foo", "function", 1, "go"); err != nil {
-		t.Fatalf("insert symbol: %v", err)
-	}
-
-	if err := db.DeleteProject(ctx, "x"); err != nil {
-		t.Fatalf("delete: %v", err)
+	p, err := db.GetProject(ctx, "x@v1")
+	if err != nil || p.ParsedAt == nil {
+		t.Fatalf("ReplaceSymbols must stamp parsed_at: %+v %v", p, err)
 	}
 
-	var n int
-	if err := db.sql.QueryRowContext(ctx, `SELECT count(*) FROM symbols WHERE project = ?`, "x").Scan(&n); err != nil {
-		t.Fatalf("count: %v", err)
+	// Removing one versioned checkout drops only its symbols.
+	if err := db.DeleteCheckout(ctx, "x@v1"); err != nil {
+		t.Fatalf("delete checkout: %v", err)
 	}
-	if n != 0 {
-		t.Errorf("symbol rows not cascaded; %d remaining", n)
+	if n := countSymbols(t, db, "x@v1"); n != 0 {
+		t.Errorf("x@v1 symbols not cascaded: %d", n)
+	}
+	if n := countSymbols(t, db, "x"); n != 1 {
+		t.Errorf("default checkout symbols must survive: %d", n)
+	}
+	// Removing the repo drops everything.
+	if err := db.DeleteRepo(ctx, "x"); err != nil {
+		t.Fatalf("delete repo: %v", err)
+	}
+	if _, err := db.GetProject(ctx, "x"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("default checkout should cascade with repo, got %v", err)
+	}
+	if n := countSymbols(t, db, "x"); n != 0 {
+		t.Errorf("repo symbols not cascaded: %d", n)
+	}
+	if err := db.DeleteRepo(ctx, "x"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("second delete = %v, want ErrNotFound", err)
 	}
 }
 
-func TestForeignSchemaRefused(t *testing.T) {
-	// Simulate a pre-v2 install: create a `projects` table by hand and leave
-	// user_version=0, then OpenAt should refuse rather than corrupt it.
+func TestSchemaMismatchResetsRegistry(t *testing.T) {
+	// Any other user_version — older, newer, or a stray unversioned file with
+	// our table names — is wiped and recreated, never migrated or refused.
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "foreign.db")
+	dbPath := filepath.Join(t.TempDir(), "stale.db")
+	db := func() *DB {
+		d, err := OpenAt(ctx, dbPath)
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		return d
+	}
+	d := db()
+	insertRepo(t, d, "old")
+	for _, s := range []string{"CREATE TABLE projects(name TEXT)", "PRAGMA user_version = 2"} {
+		if _, err := d.sql.ExecContext(ctx, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d.Close()
 
-	// Create a real v2 registry, then reset user_version to 0 below — from
-	// migrate()'s perspective that is indistinguishable from a foreign
-	// (pre-v2) db that has our table names but never set a version.
-	db, err := OpenAt(ctx, dbPath)
-	if err != nil {
-		t.Fatalf("open fresh: %v", err)
+	d = db()
+	defer d.Close()
+	if all, err := d.ListProjects(ctx); err != nil || len(all) != 0 {
+		t.Errorf("stale rows survived the reset: %v %v", all, err)
 	}
-	db.Close()
-	// Now corrupt: drop the user_version back to 0 and leave the tables.
-	db2, err := OpenAt(ctx, dbPath)
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
+	var version, leftovers int
+	if err := d.sql.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil || version != SchemaVersion {
+		t.Errorf("user_version = %d (%v), want %d", version, err, SchemaVersion)
 	}
-	if _, err := db2.sql.ExecContext(ctx, "PRAGMA user_version = 0"); err != nil {
-		t.Fatalf("reset user_version: %v", err)
+	if err := d.sql.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='projects'`).Scan(&leftovers); err != nil || leftovers != 0 {
+		t.Errorf("foreign table not dropped: %d %v", leftovers, err)
 	}
-	db2.Close()
-
-	if _, err := OpenAt(ctx, dbPath); !errors.Is(err, ErrIncompatibleSchema) {
-		t.Errorf("OpenAt on unversioned tables: got err=%v, want ErrIncompatibleSchema", err)
+	insertRepo(t, d, "fresh")
+	if p, err := d.GetProject(ctx, "fresh"); err != nil || p.Repo != "fresh" {
+		t.Errorf("registry unusable after reset: %+v %v", p, err)
 	}
 }

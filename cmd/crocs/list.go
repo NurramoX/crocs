@@ -14,7 +14,7 @@ type listResponse struct {
 
 var listCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List all tracked projects",
+	Short: "List all tracked repos and their checkouts",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmdCtx(cmd)
@@ -24,16 +24,11 @@ var listCmd = &cobra.Command{
 		}
 		defer db.Close()
 
-		projects, err := db.ListProjects(ctx)
+		all, err := db.ListProjects(ctx)
 		if err != nil {
 			return fmt.Errorf("list projects: %w", err)
 		}
-
-		resp := listResponse{Projects: make([]projectJSON, 0, len(projects))}
-		for _, p := range projects {
-			resp.Projects = append(resp.Projects, projectToJSON(p))
-		}
-		return output.Write(cmd.OutOrStdout(), "list", resp)
+		return output.Write(cmd.OutOrStdout(), "list", listResponse{Projects: groupProjects(all)})
 	},
 }
 

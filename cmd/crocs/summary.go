@@ -15,7 +15,8 @@ type summaryReadme struct {
 }
 
 type summaryResponse struct {
-	Project        projectJSON        `json:"project"`
+	Repo           string             `json:"repo"`
+	Checkout       checkoutJSON       `json:"checkout"`
 	TotalFiles     int                `json:"total_files"`
 	Languages      []detect.LangCount `json:"languages"`
 	ImportantFiles []string           `json:"important_files"`
@@ -70,7 +71,8 @@ one cheap call an agent makes to orient on an unfamiliar repo.`,
 		}
 
 		return output.Write(cmd.OutOrStdout(), "summary", summaryResponse{
-			Project:        projectToJSON(p),
+			Repo:           p.Repo,
+			Checkout:       checkoutToJSON(p),
 			TotalFiles:     len(files),
 			Languages:      langs,
 			ImportantFiles: important,
