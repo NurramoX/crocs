@@ -39,7 +39,7 @@ type SymbolRow struct {
 // changing ops (update/checkout/unshallow) — PLAN.md §5 last paragraph.
 //
 // Bulk-inserts in a single transaction so even ~25k rows complete in well
-// under a second on commodity hardware (Phase 0 measured 171k rows/s).
+// under a second on commodity hardware (measured 171k rows/s).
 func (db *DB) ReplaceSymbols(ctx context.Context, project string, rows []SymbolInput) error {
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
@@ -87,7 +87,7 @@ func (db *DB) ReplaceSymbols(ctx context.Context, project string, rows []SymbolI
 
 // SymbolQuery narrows a FindSymbols call. Empty slices mean "no filter on
 // this dimension"; an empty Projects with NamePattern set is the
-// cross-project mode from PLAN.md §2 #8.
+// cross-project mode.
 type SymbolQuery struct {
 	Projects    []string // restrict to these projects (cross-project subset)
 	NamePattern string   // SQL LIKE pattern (callers escape % and _ if literal); see NormalizeGlob

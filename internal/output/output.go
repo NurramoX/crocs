@@ -1,5 +1,5 @@
 // Package output owns the stable JSON envelope every crocs command
-// emits. PLAN.md §1 Breaking Change #1: top-level "_meta" with the schema
+// emits: a top-level "_meta" with the schema
 // version key "crocs" and the invoking command name.
 //
 //	{
@@ -19,7 +19,7 @@ import (
 )
 
 // SchemaVersion is the value of "_meta.crocs". Bump only on contract-breaking
-// changes — that's a Breaking Change in MIGRATION.md.
+// changes.
 const SchemaVersion = "1"
 
 // MetaKey is the schema-version key inside "_meta". Lifted to a constant so
@@ -34,7 +34,7 @@ var Compact = false
 
 // Meta is the envelope's `_meta` value.
 type Meta struct {
-	// Crocs holds the schema-version string. JSON-tagged "crocs" per PLAN.md;
+	// Crocs holds the schema-version string. JSON-tagged "crocs";
 	// consumers branch on this. (Field name is intentionally the eventual
 	// tool name, not the binary name.)
 	Crocs   string `json:"crocs"`

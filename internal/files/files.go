@@ -1,4 +1,4 @@
-// Package files implements `read-files` bundling. This is PLAN.md §2's
+// Package files implements `read-files` bundling. This is the
 // XML carve-out from the JSON default — files' bodies are easier to read
 // (and grep-follow-up easier to reason about) in XML than in JSON-escaped
 // strings.
@@ -55,7 +55,7 @@ const DefaultMaxSizeKB = 100
 const rangedReadMaxBytes = 10 << 20
 
 // SchemaVersion is the value of the `crocs` attribute on the root <files>
-// element. Mirrors output.SchemaVersion (PLAN.md §2 #1).
+// element. Mirrors output.SchemaVersion.
 const SchemaVersion = "1"
 
 // Bundle writes the XML document to w.

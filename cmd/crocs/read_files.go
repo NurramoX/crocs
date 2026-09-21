@@ -15,7 +15,7 @@ var readFilesCmd = &cobra.Command{
 	Use:   "read-files <name> <path>...",
 	Short: "Bundle files from a project in XML-tagged format",
 	Long: `Bundle one or more files into a single XML document for an agent to read.
-The output is XML, not JSON — PLAN.md §2 Breaking Change #2: read-files is the
+The output is XML, not JSON: read-files is the
 sole carve-out from the JSON-default contract because file bodies are easier to
 read and debug as plain text than as JSON-escaped strings.`,
 	Args: cobra.MinimumNArgs(2),

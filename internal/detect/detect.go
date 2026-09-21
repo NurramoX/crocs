@@ -1,6 +1,6 @@
 // Package detect identifies languages by file extension. The mapping is
-// intentionally small and curated; PLAN.md scopes Phase 0/1 to a handful of
-// languages and we keep the table minimal so additions are deliberate.
+// intentionally small and curated: crocs targets a handful of
+// languages and the table stays minimal so additions are deliberate.
 package detect
 
 import (

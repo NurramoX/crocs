@@ -1,6 +1,6 @@
 // Package project defines on-disk layout: where the registry db lives, where
-// clones live, and how project names are normalized. PLAN.md §1 Breaking
-// Change #6: $XDG_DATA_HOME/crocs (or ~/.local/share/crocs).
+// clones live, and how project names are normalized. The root is
+// $XDG_DATA_HOME/crocs (or ~/.local/share/crocs).
 package project
 
 import (

@@ -1,8 +1,8 @@
 // Package symbols extracts function/class/method definitions from source
 // files via github.com/odvcencio/gotreesitter. Pure-Go (CGO_ENABLED=0). The
-// 5 grammars committed to in PLAN.md §1 — Python, TypeScript, TSX, Java, Go
+// 5 supported grammars — Python, TypeScript, TSX, Java, Go
 // — are the v1 surface. Files in other languages are skipped (no regex
-// fallback per Breaking Change #3).
+// fallback).
 package symbols
 
 import (
@@ -228,7 +228,7 @@ func ExtractDir(ctx context.Context, root string) ([]FileSymbols, int64, error) 
 
 // newTagger constructs a Tagger using ResolveTagsQuery — the canonical
 // entry point. The README's `entry.TagsQuery` is empty for most languages
-// (inferred from the grammar at runtime); see [[reference-gotreesitter-api]].
+// (inferred from the grammar at runtime).
 func newTagger(entry *grammars.LangEntry) (*gts.Tagger, error) {
 	q := grammars.ResolveTagsQuery(*entry)
 	if strings.TrimSpace(q) == "" {

@@ -1,5 +1,5 @@
 // Package grepx is the grep primitive: ripgrep when available (dramatically
-// faster on large repos — PLAN.md §1), pure-Go regex fallback otherwise.
+// faster on large repos), pure-Go regex fallback otherwise.
 // Output is a stable struct so the cobra layer just serializes it.
 package grepx
 

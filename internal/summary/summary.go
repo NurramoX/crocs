@@ -1,6 +1,6 @@
 // Package summary surfaces a project's "shape" in one cheap call:
 // README excerpt (badge-filtered), important manifest/config files, and
-// the language histogram. PLAN.md §6 — the #5 survivor.
+// the language histogram.
 package summary
 
 import (
@@ -32,7 +32,7 @@ type Readme struct {
 }
 
 // alwaysGlobs are filename prefixes we always include if present at the
-// project root. Case-insensitive. PLAN.md §6 calls these out by name.
+// project root. Case-insensitive.
 var alwaysGlobs = []string{
 	"README",
 	"CONTRIBUTING",
